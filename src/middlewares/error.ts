@@ -1,3 +1,4 @@
+import { APIError as BetterAuthAPIError } from "better-auth";
 import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
 
@@ -20,6 +21,11 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof BadRequestError) {
     res.status(400).json({ success: false, error: err.message });
+    return;
+  }
+
+  if (err instanceof BetterAuthAPIError) {
+    res.status(err.statusCode).json({ success: false, error: err.message });
     return;
   }
 

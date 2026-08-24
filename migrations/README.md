@@ -1,8 +1,8 @@
 # Migrations
 
-Application migrations for payment intents, receipts, and other Senda domain
-tables live here. Auth schema ownership should be decided when authentication
-lands; do not introduce two competing migration paths for the same tables.
+Application migrations for merchant auth, payment intents, receipts, and other
+Senda domain tables live here. Keep one migration path per schema so the
+application and test databases are created from the same ordered history.
 
 File naming: `<timestamp>_<description>.ts`, for example
 `20260824120000_create_payment_intents.ts`. Each migration exports `up` and

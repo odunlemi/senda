@@ -1,7 +1,35 @@
 import type { RequestHandler } from "express";
 
-import { publicPaymentIntentResponseSchema } from "../../contracts/payment-intents.js";
-import { getPublicPaymentIntent } from "./payment-intents.service.js";
+import {
+  createPaymentIntentSchema,
+  publicPaymentIntentResponseSchema,
+} from "../../contracts/payment-intents.js";
+import { createPaymentIntent, getPublicPaymentIntent } from "./payment-intents.service.js";
+
+export const createMerchantPaymentIntent: RequestHandler = async (req, res) => {
+  const merchantId = req.merchantId;
+  if (!merchantId) {
+    res.status(401).json({ success: false, error: "Unauthorized" });
+    return;
+  }
+
+  const body = createPaymentIntentSchema.parse(req.body);
+  const paymentIntent = await createPaymentIntent({
+    merchantId,
+    destinationAddress: body.destinationAddress,
+    amountAtomic: body.amountAtomic,
+    expiresAt: new Date(body.expiresAt),
+    ...(body.description ? { description: body.description } : {}),
+    ...(body.reference ? { reference: body.reference } : {}),
+  });
+
+  res.status(201).json(
+    publicPaymentIntentResponseSchema.parse({
+      success: true,
+      data: { paymentIntent },
+    }),
+  );
+};
 
 export const readPublicPaymentIntent: RequestHandler = async (req, res) => {
   const publicId = req.params.publicId;

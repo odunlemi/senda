@@ -1,9 +1,20 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { sql } from "kysely";
 
+import { getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 
 useTestDatabase();
+
+beforeAll(async () => {
+  await sql`
+    insert into "user" ("id", "name", "email")
+    values
+      ('merchant-1', 'Merchant One', 'merchant-1@example.com'),
+      ('merchant-2', 'Merchant Two', 'merchant-2@example.com')
+  `.execute(getDb());
+});
 
 const { createApp } = await import("../../src/app.js");
 const { createPaymentIntent } = await import("./payment-intents.service.js");
