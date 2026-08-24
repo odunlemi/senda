@@ -61,12 +61,71 @@ describe("merchant access", () => {
     const response = await request(app)
       .post("/api/payment-links")
       .send({
-        destinationAddress: "0xmerchant",
         amountAtomic: "1000000",
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       });
 
     expect(response.status).toBe(401);
+  });
+
+  it("requires the merchant to configure a receiving wallet", async () => {
+    const response = await request(app)
+      .post("/api/payment-links")
+      .set("Cookie", sessionCookie)
+      .send({
+        amountAtomic: "1000000",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      success: false,
+      error: "Merchant receiving wallet is not configured",
+    });
+  });
+
+  it("configures one receiving wallet and derives payment destinations from it", async () => {
+    const wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const walletResponse = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
+    expect(walletResponse.status).toBe(200);
+    const walletBody = walletResponse.body as {
+      data: { receivingWalletAddress: string };
+    };
+    expect(walletBody.data.receivingWalletAddress).toBe(wallet);
+
+    const response = await request(app)
+      .post("/api/payment-links")
+      .set("Cookie", sessionCookie)
+      .send({
+        destinationAddress: "0x1111111111111111111111111111111111111111",
+        amountAtomic: "1000000",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+    expect(response.status).toBe(201);
+    const paymentBody = response.body as {
+      data: { paymentIntent: { destinationAddress: string } };
+    };
+    expect(paymentBody.data.paymentIntent.destinationAddress).toBe(wallet);
+  });
+
+  it("returns 400 for invalid payment-link amounts and expiry", async () => {
+    const cases = [
+      { amountAtomic: "0", expiresAt: new Date(Date.now() + 60_000).toISOString() },
+      { amountAtomic: "1000000", expiresAt: new Date(Date.now() - 60_000).toISOString() },
+    ];
+
+    for (const body of cases) {
+      const response = await request(app)
+        .post("/api/payment-links")
+        .set("Cookie", sessionCookie)
+        .send(body);
+      expect(response.status).toBe(400);
+    }
   });
 
   it("creates a payment link owned by the signed-in merchant", async () => {
@@ -85,7 +144,7 @@ describe("merchant access", () => {
       data: { paymentIntent: Record<string, unknown> };
     };
     expect(body.data.paymentIntent).toMatchObject({
-      destinationAddress: "0xmerchant",
+      destinationAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       amountAtomic: "1000000",
       asset: "USDC",
       chain: "base",

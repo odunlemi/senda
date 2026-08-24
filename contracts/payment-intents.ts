@@ -1,7 +1,6 @@
 import { z } from "zod";
 
 export const createPaymentIntentSchema = z.object({
-  destinationAddress: z.string().trim().min(1),
   amountAtomic: z.string().regex(/^\d+$/),
   expiresAt: z.iso.datetime(),
   description: z.string().trim().min(1).max(500).optional(),

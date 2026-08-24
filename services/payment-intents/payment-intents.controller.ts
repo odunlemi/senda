@@ -16,7 +16,6 @@ export const createMerchantPaymentIntent: RequestHandler = async (req, res) => {
   const body = createPaymentIntentSchema.parse(req.body);
   const paymentIntent = await createPaymentIntent({
     merchantId,
-    destinationAddress: body.destinationAddress,
     amountAtomic: body.amountAtomic,
     expiresAt: new Date(body.expiresAt),
     ...(body.description ? { description: body.description } : {}),

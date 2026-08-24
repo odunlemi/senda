@@ -61,6 +61,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`create index "verification_identifier_idx" on "verification" ("identifier")`.execute(
     db,
   );
+
+  // Payment intents may predate merchant auth. Preserve those rows by
+  // creating deterministic placeholder users before enforcing the FK.
+  await sql`
+    insert into "user" ("id", "name", "email")
+    select distinct pi."merchantId", 'Legacy merchant',
+      'legacy-' || md5(pi."merchantId") || '@senda.invalid'
+    from "paymentIntents" pi
+    left join "user" u on u."id" = pi."merchantId"
+    where u."id" is null
+    on conflict ("id") do nothing
+  `.execute(db);
+
   await sql`
     alter table "paymentIntents"
     add constraint "paymentIntents_merchantId_fkey"

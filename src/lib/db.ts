@@ -3,6 +3,7 @@ import { Pool } from "pg";
 
 import { env } from "../config/env.js";
 import type { PaymentIntentsTable } from "../../services/payment-intents/payment-intents.types.js";
+import type { MerchantsTable } from "../../services/merchants/merchants.types.js";
 
 /**
  * Grows as each domain adds its own tables (payment intents, receipts, etc.).
@@ -12,6 +13,7 @@ import type { PaymentIntentsTable } from "../../services/payment-intents/payment
  */
 export interface Database {
   paymentIntents: PaymentIntentsTable;
+  user: MerchantsTable;
 }
 
 let instance: Kysely<Database> = new Kysely<Database>({

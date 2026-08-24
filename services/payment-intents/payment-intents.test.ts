@@ -14,6 +14,13 @@ beforeAll(async () => {
       ('merchant-1', 'Merchant One', 'merchant-1@example.com'),
       ('merchant-2', 'Merchant Two', 'merchant-2@example.com')
   `.execute(getDb());
+  await sql`
+    update "user"
+    set "receivingWalletAddress" = case "id"
+      when 'merchant-1' then '0x1111111111111111111111111111111111111111'
+      when 'merchant-2' then '0x2222222222222222222222222222222222222222'
+    end
+  `.execute(getDb());
 });
 
 const { createApp } = await import("../../src/app.js");
@@ -25,7 +32,6 @@ describe("payment intents", () => {
   it("creates a Base USDC payment intent that requires approval", async () => {
     const paymentIntent = await createPaymentIntent({
       merchantId: "merchant-1",
-      destinationAddress: "0xmerchant",
       amountAtomic: "10000000",
       expiresAt: new Date(Date.now() + 60_000),
       description: "Test payment",
@@ -36,7 +42,6 @@ describe("payment intents", () => {
       asset: "USDC",
       chain: "base",
       approvalRequired: true,
-      destinationAddress: "0xmerchant",
       status: "created",
     });
     expect(paymentIntent).not.toHaveProperty("merchantId");
@@ -45,7 +50,6 @@ describe("payment intents", () => {
   it("reads a payment intent through its public payment link", async () => {
     const paymentIntent = await createPaymentIntent({
       merchantId: "merchant-2",
-      destinationAddress: "0xmerchant",
       amountAtomic: "2500000",
       expiresAt: new Date(Date.now() + 60_000),
     });

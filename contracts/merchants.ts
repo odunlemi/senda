@@ -29,3 +29,10 @@ export const merchantSessionResponseSchema = z.object({
     merchant: merchantResponseSchema.shape.data.shape.merchant,
   }),
 });
+
+export const merchantWalletSchema = z.object({
+  receivingWalletAddress: z
+    .string()
+    .trim()
+    .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid receiving wallet address"),
+});

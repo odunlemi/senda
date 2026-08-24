@@ -4,16 +4,17 @@ import { paymentConfig } from "../../src/config/payment.js";
 import { getDb } from "../../src/lib/db.js";
 import type { CreatePaymentIntentInput } from "./payment-intents.types.js";
 import type { PaymentIntentRow } from "./payment-intents.types.js";
+import { badRequest } from "../../src/middlewares/error.js";
 
 function requirePositiveAtomicAmount(amountAtomic: string): void {
   if (!/^\d+$/.test(amountAtomic) || BigInt(amountAtomic) <= 0n) {
-    throw new Error("amountAtomic must be a positive integer string");
+    badRequest("amountAtomic must be a positive integer string");
   }
 }
 
 function requireFutureExpiry(expiresAt: Date): void {
   if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
-    throw new Error("expiresAt must be a future date");
+    badRequest("expiresAt must be a future date");
   }
 }
 
@@ -37,6 +38,15 @@ export async function createPaymentIntent(input: CreatePaymentIntentInput) {
   requirePositiveAtomicAmount(input.amountAtomic);
   requireFutureExpiry(input.expiresAt);
 
+  const merchant = await getDb()
+    .selectFrom("user")
+    .select("receivingWalletAddress")
+    .where("id", "=", input.merchantId)
+    .executeTakeFirst();
+  if (!merchant?.receivingWalletAddress) {
+    badRequest("Merchant receiving wallet is not configured");
+  }
+
   const now = new Date();
   const row = await getDb()
     .insertInto("paymentIntents")
@@ -47,7 +57,7 @@ export async function createPaymentIntent(input: CreatePaymentIntentInput) {
       amountAtomic: input.amountAtomic,
       asset: paymentConfig.asset,
       chain: paymentConfig.chain,
-      destinationAddress: input.destinationAddress,
+      destinationAddress: merchant.receivingWalletAddress,
       description: input.description ?? null,
       reference: input.reference ?? null,
       status: "created",

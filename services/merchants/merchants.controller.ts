@@ -4,9 +4,11 @@ import type { RequestHandler, Response } from "express";
 import {
   createMerchantSchema,
   createMerchantSessionSchema,
+  merchantWalletSchema,
   merchantResponseSchema,
   merchantSessionResponseSchema,
 } from "../../contracts/merchants.js";
+import { getDb } from "../../src/lib/db.js";
 import { getMerchantAuth } from "./merchants.config.js";
 
 function forwardAuthCookies(res: Response, headers: Headers): void {
@@ -73,4 +75,21 @@ export const readCurrentMerchant: RequestHandler = async (req, res) => {
       data: { merchant: publicMerchant(result.user) },
     }),
   );
+};
+
+export const setMerchantWallet: RequestHandler = async (req, res) => {
+  const merchantId = req.merchantId;
+  if (!merchantId) {
+    res.status(401).json({ success: false, error: "Unauthorized" });
+    return;
+  }
+  const body = merchantWalletSchema.parse(req.body);
+  await getDb()
+    .updateTable("user")
+    .set({ receivingWalletAddress: body.receivingWalletAddress, updatedAt: new Date() })
+    .where("id", "=", merchantId)
+    .executeTakeFirstOrThrow();
+  res
+    .status(200)
+    .json({ success: true, data: { receivingWalletAddress: body.receivingWalletAddress } });
 };

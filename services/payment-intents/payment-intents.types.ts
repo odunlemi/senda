@@ -29,7 +29,6 @@ export type PaymentIntentRow = Selectable<PaymentIntentsTable>;
 
 export interface CreatePaymentIntentInput {
   merchantId: string;
-  destinationAddress: string;
   amountAtomic: string;
   expiresAt: Date;
   description?: string;
