@@ -1,0 +1,31 @@
+import { z } from "zod";
+
+export const paymentIntentStatusSchema = z.enum([
+  "created",
+  "awaiting_payment",
+  "confirming",
+  "paid",
+  "expired",
+  "failed",
+]);
+
+export const publicPaymentIntentSchema = z.object({
+  id: z.string(),
+  publicId: z.string(),
+  amountAtomic: z.string().regex(/^\d+$/),
+  asset: z.literal("USDC"),
+  chain: z.literal("base"),
+  approvalRequired: z.literal(true),
+  destinationAddress: z.string().min(1),
+  description: z.string().nullable(),
+  reference: z.string().nullable(),
+  status: paymentIntentStatusSchema,
+  expiresAt: z.iso.datetime(),
+});
+
+export const publicPaymentIntentResponseSchema = z.object({
+  success: z.literal(true),
+  data: z.object({ paymentIntent: publicPaymentIntentSchema }),
+});
+
+export type PublicPaymentIntent = z.infer<typeof publicPaymentIntentSchema>;

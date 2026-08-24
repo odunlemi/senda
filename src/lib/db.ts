@@ -2,6 +2,7 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 
 import { env } from "../config/env.js";
+import type { PaymentIntentsTable } from "../../services/payment-intents/payment-intents.types.js";
 
 /**
  * Grows as each domain adds its own tables (payment intents, receipts, etc.).
@@ -9,8 +10,9 @@ import { env } from "../config/env.js";
  * here rather than per-service so Kysely's generated `db.selectFrom(...)`
  * stays type-checked across service boundaries without circular imports.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- populated as domains land.
-export interface Database {}
+export interface Database {
+  paymentIntents: PaymentIntentsTable;
+}
 
 let instance: Kysely<Database> = new Kysely<Database>({
   dialect: new PostgresDialect({

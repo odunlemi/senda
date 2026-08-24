@@ -6,6 +6,7 @@ import { env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
 import { errorHandler } from "./middlewares/error.js";
 import { notFound } from "./middlewares/notFound.js";
+import { paymentIntentsRouter } from "../services/payment-intents/payment-intents.routes.js";
 
 export function createApp(): Express {
   const app = express();
@@ -20,7 +21,7 @@ export function createApp(): Express {
 
   // Routers mount here as steps land:
   // app.use("/api", authRouter);
-  // app.use("/api", paymentIntentsRouter);
+  app.use("/api", paymentIntentsRouter);
 
   app.use(notFound);
   app.use(errorHandler);
