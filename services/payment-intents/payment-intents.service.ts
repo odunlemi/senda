@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { paymentConfig } from "../../src/config/payment.js";
 import { getDb } from "../../src/lib/db.js";
+import { badRequest } from "../../src/lib/errors.js";
 import type { CreatePaymentIntentInput } from "./payment-intents.types.js";
 import type { PaymentIntentRow } from "./payment-intents.types.js";
-import { badRequest } from "../../src/middlewares/error.js";
 
 function requirePositiveAtomicAmount(amountAtomic: string): void {
   if (!/^\d+$/.test(amountAtomic) || BigInt(amountAtomic) <= 0n) {
@@ -18,7 +18,7 @@ function requireFutureExpiry(expiresAt: Date): void {
   }
 }
 
-function toPublicPaymentIntent(row: PaymentIntentRow) {
+export function toPublicPaymentIntent(row: PaymentIntentRow) {
   return {
     id: row.id,
     publicId: row.publicId,
@@ -31,6 +31,8 @@ function toPublicPaymentIntent(row: PaymentIntentRow) {
     reference: row.reference,
     status: row.status,
     expiresAt: row.expiresAt.toISOString(),
+    payerAddress: row.payerAddress,
+    transactionHash: row.transactionHash,
   };
 }
 

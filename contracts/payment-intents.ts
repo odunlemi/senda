@@ -28,6 +28,8 @@ export const publicPaymentIntentSchema = z.object({
   reference: z.string().nullable(),
   status: paymentIntentStatusSchema,
   expiresAt: z.iso.datetime(),
+  payerAddress: z.string().nullable(),
+  transactionHash: z.string().nullable(),
 });
 
 export const publicPaymentIntentResponseSchema = z.object({

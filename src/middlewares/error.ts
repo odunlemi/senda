@@ -3,13 +3,7 @@ import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
 
 import { logger } from "../lib/logger.js";
-
-export class BadRequestError extends Error {}
-
-/** Throw from a controller; caught by errorHandler below. */
-export function badRequest(message: string): never {
-  throw new BadRequestError(message);
-}
+import { BadRequestError, NotFoundError } from "../lib/errors.js";
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
@@ -21,6 +15,11 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof BadRequestError) {
     res.status(400).json({ success: false, error: err.message });
+    return;
+  }
+
+  if (err instanceof NotFoundError) {
+    res.status(404).json({ success: false, error: err.message });
     return;
   }
 

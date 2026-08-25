@@ -4,7 +4,9 @@
  */
 export const paymentConfig = {
   chain: "base",
+  chainId: 8453,
   asset: "USDC",
+  assetContractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   approvalRequired: true,
 } as const;
 
