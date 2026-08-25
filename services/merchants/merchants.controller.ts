@@ -16,12 +16,24 @@ function forwardAuthCookies(res: Response, headers: Headers): void {
   if (cookies.length > 0) res.setHeader("Set-Cookie", cookies);
 }
 
-function publicMerchant(user: { id: string; name: string; email: string; emailVerified: boolean }) {
+async function publicMerchant(user: {
+  id: string;
+  name: string;
+  email: string;
+  emailVerified: boolean;
+}) {
+  const merchant = await getDb()
+    .selectFrom("user")
+    .select("receivingWalletAddress")
+    .where("id", "=", user.id)
+    .executeTakeFirstOrThrow();
+
   return {
     id: user.id,
     name: user.name,
     email: user.email,
     emailVerified: user.emailVerified,
+    receivingWalletAddress: merchant.receivingWalletAddress,
   };
 }
 
@@ -37,7 +49,7 @@ export const createMerchant: RequestHandler = async (req, res) => {
   res.status(201).json(
     merchantResponseSchema.parse({
       success: true,
-      data: { merchant: publicMerchant(result.response.user) },
+      data: { merchant: await publicMerchant(result.response.user) },
     }),
   );
 };
@@ -54,7 +66,7 @@ export const createMerchantSession: RequestHandler = async (req, res) => {
   res.status(201).json(
     merchantSessionResponseSchema.parse({
       success: true,
-      data: { merchant: publicMerchant(result.response.user) },
+      data: { merchant: await publicMerchant(result.response.user) },
     }),
   );
 };
@@ -72,7 +84,7 @@ export const readCurrentMerchant: RequestHandler = async (req, res) => {
   res.status(200).json(
     merchantResponseSchema.parse({
       success: true,
-      data: { merchant: publicMerchant(result.user) },
+      data: { merchant: await publicMerchant(result.user) },
     }),
   );
 };

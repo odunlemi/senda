@@ -32,9 +32,10 @@ describe("merchant access", () => {
 
     expect(response.status).toBe(201);
     const body = response.body as {
-      data: { merchant: { email: string } };
+      data: { merchant: { email: string; receivingWalletAddress: string | null } };
     };
     expect(body.data.merchant.email).toBe(email);
+    expect(body.data.merchant.receivingWalletAddress).toBeNull();
     sessionCookie = requireSessionCookie(response);
   });
 
@@ -96,6 +97,14 @@ describe("merchant access", () => {
       data: { receivingWalletAddress: string };
     };
     expect(walletBody.data.receivingWalletAddress).toBe(wallet);
+
+    const merchantResponse = await request(app)
+      .get("/api/merchant-sessions/current")
+      .set("Cookie", sessionCookie);
+    const merchantBody = merchantResponse.body as {
+      data: { merchant: { receivingWalletAddress: string | null } };
+    };
+    expect(merchantBody.data.merchant.receivingWalletAddress).toBe(wallet);
 
     const response = await request(app)
       .post("/api/payment-links")

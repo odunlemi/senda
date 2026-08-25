@@ -14,6 +14,7 @@ export const merchantResponseSchema = z.object({
       name: z.string(),
       email: z.email(),
       emailVerified: z.boolean(),
+      receivingWalletAddress: z.string().nullable(),
     }),
   }),
 });
