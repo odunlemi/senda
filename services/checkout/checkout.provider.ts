@@ -1,4 +1,5 @@
 import { env } from "../../src/config/env.js";
+import { paymentConfig } from "../../src/config/payment.js";
 
 export interface BaseTransaction {
   hash: string;
@@ -20,7 +21,9 @@ export interface BaseTransactionReceipt {
   status: string | null;
 }
 
-class JsonRpcBaseTransactionProvider implements BaseTransactionProvider {
+export class JsonRpcBaseTransactionProvider implements BaseTransactionProvider {
+  private chainIdentityValidated = false;
+
   private async rpc<T>(method: string, params: string[]): Promise<T | undefined> {
     const response = await fetch(env.BASE_RPC_URL, {
       method: "POST",
@@ -36,17 +39,29 @@ class JsonRpcBaseTransactionProvider implements BaseTransactionProvider {
     return body.result ?? undefined;
   }
 
+  private async ensureBaseChain(): Promise<void> {
+    if (this.chainIdentityValidated) return;
+    const chainId = await this.rpc<string>("eth_chainId", []);
+    if (!chainId || Number.parseInt(chainId, 16) !== paymentConfig.chainId) {
+      throw new Error(`Base RPC chain mismatch; expected chain ${paymentConfig.chainId}`);
+    }
+    this.chainIdentityValidated = true;
+  }
+
   async getTransaction(transactionHash: string): Promise<BaseTransaction | undefined> {
+    await this.ensureBaseChain();
     return this.rpc<BaseTransaction>("eth_getTransactionByHash", [transactionHash]);
   }
 
   async getTransactionReceipt(
     transactionHash: string,
   ): Promise<BaseTransactionReceipt | undefined> {
+    await this.ensureBaseChain();
     return this.rpc<BaseTransactionReceipt>("eth_getTransactionReceipt", [transactionHash]);
   }
 
   async getCurrentBlockNumber(): Promise<number> {
+    await this.ensureBaseChain();
     const blockNumber = await this.rpc<string>("eth_blockNumber", []);
     if (!blockNumber) throw new Error("Base RPC returned no block number");
     return Number.parseInt(blockNumber, 16);

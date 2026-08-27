@@ -146,7 +146,10 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
 
   if (!row) {
     const current = await requirePaymentIntent(publicId);
-    if (current.transactionHash === normalizedHash && current.status === "confirming") {
+    if (
+      current.transactionHash === normalizedHash &&
+      (current.status === "confirming" || current.status === "paid")
+    ) {
       return toPublicPaymentIntent(current);
     }
     badRequest("Payment link is no longer awaiting payment");

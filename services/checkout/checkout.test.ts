@@ -6,6 +6,7 @@ import { getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 import { paymentConfig } from "../../src/config/payment.js";
 import { setBaseTransactionProvider } from "./checkout.provider.js";
+import { reconcileConfirmingPaymentIntents } from "./checkout.worker.js";
 
 useTestDatabase();
 
@@ -142,6 +143,51 @@ describe("guided checkout", () => {
     ).toBe(true);
   });
 
+  it("returns paid when submission races with reconciliation", async () => {
+    const hash = `0x${"3".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "2850000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: async () => {
+        await getDb()
+          .updateTable("paymentIntents")
+          .set({
+            status: "paid",
+            payerAddress,
+            transactionHash: hash,
+            confirmationCount: paymentConfig.requiredConfirmations,
+            updatedAt: new Date(),
+          })
+          .where("publicId", "=", paymentIntent.publicId)
+          .execute();
+        return {
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "2850000"),
+          value: "0x0",
+        };
+      },
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    const response = await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "paid",
+      transactionHash: hash,
+    });
+  });
+
   it("rejects reusing a transaction hash on another payment link", async () => {
     const hash = `0x${"1".repeat(64)}`;
     const firstIntent = await createPaymentIntent({
@@ -205,7 +251,7 @@ describe("guided checkout", () => {
         }),
       getTransactionReceipt: () =>
         Promise.resolve({ transactionHash: hash, blockNumber: "0x10", status: "0x1" }),
-      getCurrentBlockNumber: () => Promise.resolve(0x10),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
     });
 
     await request(app)
@@ -218,8 +264,44 @@ describe("guided checkout", () => {
     expect(response.status).toBe(200);
     expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
       status: "paid",
-      confirmationCount: 1,
+      confirmationCount: 12,
     });
+  });
+
+  it("reconciles confirming intents without a checkout-page request", async () => {
+    const hash = `0x${"2".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "9000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "9000000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({ transactionHash: hash, blockNumber: "0x40", status: "0x1" }),
+      getCurrentBlockNumber: () => Promise.resolve(0x4b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await reconcileConfirmingPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "confirmationCount"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({ status: "paid", confirmationCount: 12 });
   });
 
   it("marks a reverted transaction as failed", async () => {

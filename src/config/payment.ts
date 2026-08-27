@@ -7,7 +7,9 @@ export const paymentConfig = {
   chainId: 8453,
   asset: "USDC",
   assetContractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  requiredConfirmations: 1,
+  // Acceptance threshold for Base payments. This is operational finality,
+  // not a guarantee that a deep chain reorg is impossible.
+  requiredConfirmations: 12,
   approvalRequired: true,
 } as const;
 

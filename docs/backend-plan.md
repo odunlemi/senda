@@ -73,6 +73,13 @@ transaction against that intent. Unrelated transfers to the shared business
 wallet must not be guessed into a payment link: without a guided checkout,
 two payments with the same amount are inherently ambiguous.
 
+For the MVP, Senda accepts a successful Base transaction after 12 block
+confirmations, counting the transaction's inclusion block as the first. This
+is an operational acceptance threshold, not a promise that a deep chain
+reorganization is impossible. Paid intents are terminal for now; future reorg
+monitoring should audit and compensate rather than silently rewriting
+customer-facing payment history.
+
 ## State Model
 
 The user-facing state model stays small:

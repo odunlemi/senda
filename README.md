@@ -1,6 +1,6 @@
 # senda
 
-Senda is a simple, crypto-native payment-link product. A business creates a
+Senda is a simple, crypto-native payment link product. A business creates a
 payment link or embeddable button, a customer explicitly approves one payment,
 and both sides receive a receipt containing the blockchain transaction hash.
 

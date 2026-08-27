@@ -8,6 +8,7 @@ const envSchema = z.object({
   BETTER_AUTH_SECRET: z.string().min(32),
   BETTER_AUTH_URL: z.url(),
   BASE_RPC_URL: z.url().default("https://mainnet.base.org"),
+  CHECKOUT_RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
 });
 
 export const env = envSchema.parse(process.env);
