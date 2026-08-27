@@ -4,7 +4,7 @@ import { publicPaymentIntentSchema } from "./payment-intents.js";
 
 export const transactionHashSchema = z
   .string()
-  .regex(/^0x[a-fA-F0-9]{64}$/, "Invalid transaction hash");
+  .regex(/^0x[a-fA-F0-9]{64}$/i, "Invalid transaction hash");
 
 export const submitCheckoutTransactionSchema = z.object({
   transactionHash: transactionHashSchema,

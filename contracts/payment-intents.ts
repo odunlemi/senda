@@ -30,6 +30,7 @@ export const publicPaymentIntentSchema = z.object({
   expiresAt: z.iso.datetime(),
   payerAddress: z.string().nullable(),
   transactionHash: z.string().nullable(),
+  confirmationCount: z.number().int().nonnegative(),
 });
 
 export const publicPaymentIntentResponseSchema = z.object({

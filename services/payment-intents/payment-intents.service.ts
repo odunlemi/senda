@@ -33,6 +33,7 @@ export function toPublicPaymentIntent(row: PaymentIntentRow) {
     expiresAt: row.expiresAt.toISOString(),
     payerAddress: row.payerAddress,
     transactionHash: row.transactionHash,
+    confirmationCount: row.confirmationCount,
   };
 }
 

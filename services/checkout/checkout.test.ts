@@ -82,18 +82,20 @@ describe("guided checkout", () => {
           input: transferInput(destinationAddress, "2500000"),
           value: "0x0",
         }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
     });
 
     const response = await request(app)
       .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
-      .send({ transactionHash });
+      .send({ transactionHash: `0x${"A".repeat(64)}` });
 
     expect(response.status).toBe(200);
     const body = response.body as CheckoutBody;
     expect(body.data.paymentIntent).toMatchObject({
       status: "confirming",
       payerAddress,
-      transactionHash,
+      transactionHash: transactionHash.toLowerCase(),
     });
 
     const repeatedResponse = await request(app)
@@ -102,7 +104,196 @@ describe("guided checkout", () => {
     expect(repeatedResponse.status).toBe(200);
   });
 
+  it("normalizes a mixed-case hash and safely handles concurrent submissions", async () => {
+    const hash = `0x${"f".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "2750000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "2750000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    const responses = await Promise.all(
+      [0, 1].map(() =>
+        request(app)
+          .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+          .send({ transactionHash: `0x${"F".repeat(64)}` }),
+      ),
+    );
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(
+      responses.every(
+        (response) => (response.body as CheckoutBody).data.paymentIntent.transactionHash === hash,
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects reusing a transaction hash on another payment link", async () => {
+    const hash = `0x${"1".repeat(64)}`;
+    const firstIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "7000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const secondIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "8000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${firstIntent.publicId}/checkout`);
+    await request(app).post(`/api/payment-links/${secondIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "7000000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    const firstResponse = await request(app)
+      .post(`/api/payment-links/${firstIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    expect(firstResponse.status).toBe(200);
+
+    const secondResponse = await request(app)
+      .post(`/api/payment-links/${secondIntent.publicId}/transactions`)
+      .send({ transactionHash: hash.toUpperCase() });
+    expect(secondResponse.status).toBe(400);
+    expect(secondResponse.body).toEqual({
+      success: false,
+      error: "Transaction is already associated with another payment link",
+    });
+  });
+
+  it("reconciles a mined successful transaction as paid", async () => {
+    const hash = `0x${"b".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "4000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "4000000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({ transactionHash: hash, blockNumber: "0x10", status: "0x1" }),
+      getCurrentBlockNumber: () => Promise.resolve(0x10),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "paid",
+      confirmationCount: 1,
+    });
+  });
+
+  it("marks a reverted transaction as failed", async () => {
+    const hash = `0x${"c".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "5000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "5000000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({ transactionHash: hash, blockNumber: "0x20", status: "0x0" }),
+      getCurrentBlockNumber: () => Promise.resolve(0x20),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent.status).toBe("failed");
+  });
+
+  it("keeps pending transactions in confirming", async () => {
+    const hash = `0x${"d".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "6000000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "6000000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0x30),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "confirming",
+      confirmationCount: 0,
+    });
+  });
+
   it("rejects a transaction whose transfer does not match the intent", async () => {
+    const hash = `0x${"e".repeat(64)}`;
     const paymentIntent = await createPaymentIntent({
       merchantId: "checkout-merchant",
       amountAtomic: "3000000",
@@ -113,17 +304,19 @@ describe("guided checkout", () => {
     setBaseTransactionProvider({
       getTransaction: () =>
         Promise.resolve({
-          hash: transactionHash,
+          hash,
           from: payerAddress,
           to: paymentConfig.assetContractAddress,
           input: transferInput(destinationAddress, "1"),
           value: "0x0",
         }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
     });
 
     const response = await request(app)
       .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
-      .send({ transactionHash });
+      .send({ transactionHash: hash });
 
     expect(response.status).toBe(400);
     expect(response.body).toEqual({
