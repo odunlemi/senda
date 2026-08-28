@@ -407,3 +407,125 @@ describe("guided checkout", () => {
     });
   });
 });
+
+describe("confirming timeout", () => {
+  it("marks a stale confirming intent as dropped", async () => {
+    const hash = `0x${"0".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "3500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "3500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+
+    const timeoutAgo = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
+    await sql`
+      update "paymentIntents" set "updatedAt" = ${timeoutAgo}
+      where "publicId" = ${paymentIntent.publicId}
+    `.execute(getDb());
+
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "dropped",
+    });
+  });
+
+  it("keeps a fresh confirming intent in confirming", async () => {
+    const hash = `0x${"9".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "4500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "4500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "confirming",
+    });
+  });
+
+  it("drops stale confirming intents in the background worker", async () => {
+    const hash = `0x${"7".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "5500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "5500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+
+    const timeoutAgo = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
+    await sql`
+      update "paymentIntents" set "updatedAt" = ${timeoutAgo}
+      where "publicId" = ${paymentIntent.publicId}
+    `.execute(getDb());
+
+    await reconcileConfirmingPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select("status")
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("dropped");
+  });
+});

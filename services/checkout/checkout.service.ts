@@ -80,7 +80,9 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
   const paymentIntent = await requirePaymentIntent(publicId);
   if (
     paymentIntent.transactionHash === normalizedHash &&
-    (paymentIntent.status === "confirming" || paymentIntent.status === "paid")
+    (paymentIntent.status === "confirming" ||
+      paymentIntent.status === "paid" ||
+      paymentIntent.status === "dropped")
   ) {
     return toPublicPaymentIntent(paymentIntent);
   }
@@ -160,7 +162,7 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
 
 export async function reconcileCheckout(publicId: string) {
   const paymentIntent = await requirePaymentIntent(publicId);
-  if (paymentIntent.status === "paid" || paymentIntent.status === "failed") {
+  if (paymentIntent.status === "paid" || paymentIntent.status === "failed" || paymentIntent.status === "dropped") {
     return toPublicPaymentIntent(paymentIntent);
   }
   if (paymentIntent.status !== "confirming" || !paymentIntent.transactionHash) {
@@ -170,6 +172,17 @@ export async function reconcileCheckout(publicId: string) {
   const provider = getBaseTransactionProvider();
   const receipt = await provider.getTransactionReceipt(paymentIntent.transactionHash);
   if (!receipt?.blockNumber) {
+    const elapsedMs = Date.now() - paymentIntent.updatedAt.getTime();
+    if (elapsedMs > paymentConfig.confirmingTimeoutMs) {
+      const row = await getDb()
+        .updateTable("paymentIntents")
+        .set({ status: "dropped", updatedAt: new Date() })
+        .where("id", "=", paymentIntent.id)
+        .where("status", "=", "confirming")
+        .returningAll()
+        .executeTakeFirst();
+      return toPublicPaymentIntent(row ?? (await requirePaymentIntent(publicId)));
+    }
     return toPublicPaymentIntent(paymentIntent);
   }
   if (receipt.transactionHash.toLowerCase() !== paymentIntent.transactionHash) {

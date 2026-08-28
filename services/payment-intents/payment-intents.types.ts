@@ -3,7 +3,13 @@ import type { Generated, Selectable } from "kysely";
 import type { SendaAsset, SendaChain } from "../../src/config/payment.js";
 
 export type PaymentIntentStatus =
-  "created" | "awaiting_payment" | "confirming" | "paid" | "expired" | "failed";
+  | "created"
+  | "awaiting_payment"
+  | "confirming"
+  | "paid"
+  | "expired"
+  | "failed"
+  | "dropped";
 
 export interface PaymentIntentsTable {
   id: string;

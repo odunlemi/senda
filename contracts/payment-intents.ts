@@ -14,6 +14,7 @@ export const paymentIntentStatusSchema = z.enum([
   "paid",
   "expired",
   "failed",
+  "dropped",
 ]);
 
 export const publicPaymentIntentSchema = z.object({
