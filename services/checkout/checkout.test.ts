@@ -31,6 +31,18 @@ function transferInput(destination: string, amountAtomic: string): string {
     .padStart(64, "0")}`;
 }
 
+function usdcTransferLog(payer: string, destination: string, amountAtomic: string) {
+  return {
+    address: paymentConfig.assetContractAddress,
+    topics: [
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      `0x${"0".repeat(24)}${payer.slice(2)}`,
+      `0x${"0".repeat(24)}${destination.slice(2)}`,
+    ],
+    data: `0x${BigInt(amountAtomic).toString(16).padStart(64, "0")}`,
+  };
+}
+
 beforeAll(async () => {
   await sql`
     insert into "user" ("id", "name", "email", "receivingWalletAddress")
@@ -250,7 +262,12 @@ describe("guided checkout", () => {
           value: "0x0",
         }),
       getTransactionReceipt: () =>
-        Promise.resolve({ transactionHash: hash, blockNumber: "0x10", status: "0x1" }),
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "4000000")],
+        }),
       getCurrentBlockNumber: () => Promise.resolve(0x1b),
     });
 
@@ -287,7 +304,12 @@ describe("guided checkout", () => {
           value: "0x0",
         }),
       getTransactionReceipt: () =>
-        Promise.resolve({ transactionHash: hash, blockNumber: "0x40", status: "0x1" }),
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x40",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "9000000")],
+        }),
       getCurrentBlockNumber: () => Promise.resolve(0x4b),
     });
 
@@ -323,7 +345,12 @@ describe("guided checkout", () => {
           value: "0x0",
         }),
       getTransactionReceipt: () =>
-        Promise.resolve({ transactionHash: hash, blockNumber: "0x20", status: "0x0" }),
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x20",
+          status: "0x0",
+          logs: [],
+        }),
       getCurrentBlockNumber: () => Promise.resolve(0x20),
     });
 
@@ -404,6 +431,50 @@ describe("guided checkout", () => {
     expect(response.body).toEqual({
       success: false,
       error: "Transaction does not match this payment link",
+    });
+  });
+});
+
+describe("receipt log validation", () => {
+  it("marks a successful receipt without a matching Transfer log as failed", async () => {
+    const hash = `0x${"4".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    const response = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+
+    expect(response.status).toBe(200);
+    expect((response.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "failed",
+      confirmationCount: 12,
     });
   });
 });

@@ -9,6 +9,13 @@ export interface BaseTransaction {
   value: string;
 }
 
+export interface BaseTransactionLog {
+  address: string;
+  topics: string[];
+  data: string;
+  removed?: boolean;
+}
+
 export interface BaseTransactionProvider {
   getTransaction(transactionHash: string): Promise<BaseTransaction | undefined>;
   getTransactionReceipt(transactionHash: string): Promise<BaseTransactionReceipt | undefined>;
@@ -19,6 +26,7 @@ export interface BaseTransactionReceipt {
   transactionHash: string;
   blockNumber: string | null;
   status: string | null;
+  logs: BaseTransactionLog[];
 }
 
 export class JsonRpcBaseTransactionProvider implements BaseTransactionProvider {

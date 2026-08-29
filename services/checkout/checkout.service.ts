@@ -2,10 +2,14 @@ import { paymentConfig } from "../../src/config/payment.js";
 import { getDb } from "../../src/lib/db.js";
 import { badRequest, notFound } from "../../src/lib/errors.js";
 import { toPublicPaymentIntent } from "../payment-intents/payment-intents.service.js";
-import type { PaymentIntentRow } from "../payment-intents/payment-intents.types.js";
-import { getBaseTransactionProvider } from "./checkout.provider.js";
+import { getBaseTransactionProvider, type BaseTransactionReceipt } from "./checkout.provider.js";
+import type {
+  PaymentIntentRow,
+  PaymentIntentStatus,
+} from "../payment-intents/payment-intents.types.js";
 
 const transferSelector = "a9059cbb";
+const transferEventSignature = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 function normalizeTransactionHash(transactionHash: string): string {
   return `0x${transactionHash.replace(/^0x/i, "").toLowerCase()}`;
@@ -22,6 +26,31 @@ function encodeUsdcTransfer(destinationAddress: string, amountAtomic: string): s
   const destination = destinationAddress.toLowerCase().replace(/^0x/, "").padStart(64, "0");
   const amount = BigInt(amountAtomic).toString(16).padStart(64, "0");
   return `0x${transferSelector}${destination}${amount}`;
+}
+
+function hasMatchingTransferLog(
+  receipt: BaseTransactionReceipt,
+  paymentIntent: PaymentIntentRow,
+): boolean {
+  if (!paymentIntent.payerAddress) return false;
+
+  const expectedFrom = `0x${paymentIntent.payerAddress.slice(2).padStart(64, "0")}`.toLowerCase();
+  const expectedTo =
+    `0x${paymentIntent.destinationAddress.slice(2).padStart(64, "0")}`.toLowerCase();
+  const expectedValue =
+    `0x${BigInt(paymentIntent.amountAtomic).toString(16).padStart(64, "0")}`.toLowerCase();
+
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== paymentConfig.assetContractAddress.toLowerCase()) continue;
+    if (log.topics[0]?.toLowerCase() !== transferEventSignature) continue;
+    if (log.topics[1]?.toLowerCase() !== expectedFrom) continue;
+    if (log.topics[2]?.toLowerCase() !== expectedTo) continue;
+    if (log.data.toLowerCase() !== expectedValue) continue;
+    if (log.removed) continue;
+    return true;
+  }
+
+  return false;
 }
 
 function requireOpenPaymentIntent(row: PaymentIntentRow): void {
@@ -162,7 +191,11 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
 
 export async function reconcileCheckout(publicId: string) {
   const paymentIntent = await requirePaymentIntent(publicId);
-  if (paymentIntent.status === "paid" || paymentIntent.status === "failed" || paymentIntent.status === "dropped") {
+  if (
+    paymentIntent.status === "paid" ||
+    paymentIntent.status === "failed" ||
+    paymentIntent.status === "dropped"
+  ) {
     return toPublicPaymentIntent(paymentIntent);
   }
   if (paymentIntent.status !== "confirming" || !paymentIntent.transactionHash) {
@@ -193,12 +226,15 @@ export async function reconcileCheckout(publicId: string) {
   const currentBlockNumber = await provider.getCurrentBlockNumber();
   const confirmationCount = Math.max(0, currentBlockNumber - blockNumber + 1);
   const status = receipt.status?.toLowerCase();
-  const nextStatus =
-    status === "0x0"
-      ? "failed"
-      : status === "0x1" && confirmationCount >= paymentConfig.requiredConfirmations
-        ? "paid"
-        : "confirming";
+  const hasTransferLog = hasMatchingTransferLog(receipt, paymentIntent);
+  let nextStatus: PaymentIntentStatus;
+  if (status === "0x0" || (status === "0x1" && !hasTransferLog)) {
+    nextStatus = "failed";
+  } else if (status === "0x1" && confirmationCount >= paymentConfig.requiredConfirmations) {
+    nextStatus = "paid";
+  } else {
+    nextStatus = "confirming";
+  }
 
   const row = await getDb()
     .updateTable("paymentIntents")
