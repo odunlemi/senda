@@ -81,6 +81,17 @@ flow complicated.
 embedded PGlite database per test file. Tests exercise real SQL without a
 separate database, network connection, or Docker container.
 
+## Operations
+
+Rate limiting is configured through `TRUST_PROXY_HOPS` and the `RATE_LIMIT_*`
+environment variables. Set `TRUST_PROXY_HOPS` to the number of trusted reverse
+proxies between the Railway deployment and the public internet so client IP
+budgets are keyed on the real client, not on an internal proxy.
+
+The limiter uses an in-memory store. This is correct for the current single
+API process, but a shared external store such as Redis is required before
+running multiple API instances behind a load balancer.
+
 ## Deploying
 
 `railway.json` configures the build, migrations, start command, and health

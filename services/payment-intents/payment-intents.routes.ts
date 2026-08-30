@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import { ipPublicRateLimit, merchantRateLimit } from "../../src/middlewares/rate-limit.js";
 import { requireMerchantSession } from "../merchants/merchants.middleware.js";
 import {
   createMerchantPaymentIntent,
@@ -8,5 +9,11 @@ import {
 
 export const paymentIntentsRouter = Router();
 
-paymentIntentsRouter.post("/payment-links", requireMerchantSession, createMerchantPaymentIntent);
-paymentIntentsRouter.get("/payment-links/:publicId", readPublicPaymentIntent);
+paymentIntentsRouter.post(
+  "/payment-links",
+  ipPublicRateLimit,
+  requireMerchantSession,
+  merchantRateLimit,
+  createMerchantPaymentIntent,
+);
+paymentIntentsRouter.get("/payment-links/:publicId", ipPublicRateLimit, readPublicPaymentIntent);

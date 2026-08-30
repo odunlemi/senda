@@ -1,6 +1,11 @@
 import { Router } from "express";
 
 import {
+  ipAuthRateLimit,
+  ipPublicRateLimit,
+  merchantRateLimit,
+} from "../../src/middlewares/rate-limit.js";
+import {
   createMerchant,
   createMerchantSession,
   readCurrentMerchant,
@@ -10,7 +15,13 @@ import { requireMerchantSession } from "./merchants.middleware.js";
 
 export const merchantsRouter = Router();
 
-merchantsRouter.post("/merchants", createMerchant);
-merchantsRouter.post("/merchant-sessions", createMerchantSession);
+merchantsRouter.post("/merchants", ipAuthRateLimit, createMerchant);
+merchantsRouter.post("/merchant-sessions", ipAuthRateLimit, createMerchantSession);
 merchantsRouter.get("/merchant-sessions/current", requireMerchantSession, readCurrentMerchant);
-merchantsRouter.put("/merchant-wallet", requireMerchantSession, setMerchantWallet);
+merchantsRouter.put(
+  "/merchant-wallet",
+  ipPublicRateLimit,
+  requireMerchantSession,
+  merchantRateLimit,
+  setMerchantWallet,
+);

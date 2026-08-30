@@ -14,6 +14,8 @@ import { receiptsRouter } from "../services/receipts/receipts.routes.js";
 export function createApp(): Express {
   const app = express();
 
+  app.set("trust proxy", env.TRUST_PROXY_HOPS);
+
   app.use(helmet());
   app.use(express.json());
   app.use(pinoHttp({ logger, autoLogging: env.NODE_ENV !== "test" }));
