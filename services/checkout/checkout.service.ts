@@ -1,11 +1,13 @@
 import { paymentConfig } from "../../src/config/payment.js";
 import { getDb } from "../../src/lib/db.js";
+import type { Updateable } from "kysely";
 import { badRequest, notFound } from "../../src/lib/errors.js";
 import { toPublicPaymentIntent } from "../payment-intents/payment-intents.service.js";
 import { getBaseTransactionProvider, type BaseTransactionReceipt } from "./checkout.provider.js";
 import type {
   PaymentIntentRow,
   PaymentIntentStatus,
+  PaymentIntentsTable,
 } from "../payment-intents/payment-intents.types.js";
 
 const transferSelector = "a9059cbb";
@@ -28,9 +30,9 @@ function encodeUsdcTransfer(destinationAddress: string, amountAtomic: string): s
   return `0x${transferSelector}${destination}${amount}`;
 }
 
-function hasMatchingTransferLog(
+export function hasMatchingTransferLog(
   receipt: BaseTransactionReceipt,
-  paymentIntent: PaymentIntentRow,
+  paymentIntent: Pick<PaymentIntentRow, "payerAddress" | "destinationAddress" | "amountAtomic">,
 ): boolean {
   if (!paymentIntent.payerAddress) return false;
 
@@ -236,9 +238,18 @@ export async function reconcileCheckout(publicId: string) {
     nextStatus = "confirming";
   }
 
+  const values: Updateable<PaymentIntentsTable> = {
+    status: nextStatus,
+    confirmationCount,
+    updatedAt: new Date(),
+  };
+  if (nextStatus === "paid") {
+    values.paidAt = new Date();
+  }
+
   const row = await getDb()
     .updateTable("paymentIntents")
-    .set({ status: nextStatus, confirmationCount, updatedAt: new Date() })
+    .set(values)
     .where("id", "=", paymentIntent.id)
     .where("status", "=", "confirming")
     .returningAll()

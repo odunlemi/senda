@@ -6,7 +6,10 @@ import { getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 import { paymentConfig } from "../../src/config/payment.js";
 import { setBaseTransactionProvider } from "./checkout.provider.js";
-import { reconcileConfirmingPaymentIntents } from "./checkout.worker.js";
+import {
+  reconcileConfirmingPaymentIntents,
+  reconcilePaidPaymentIntents,
+} from "./checkout.worker.js";
 
 useTestDatabase();
 
@@ -476,6 +479,376 @@ describe("receipt log validation", () => {
       status: "failed",
       confirmationCount: 12,
     });
+  });
+});
+
+describe("reorg monitoring", () => {
+  it("sets paidAt when a mined successful transaction is marked paid", async () => {
+    const hash = `0x${"5".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1200000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1200000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1200000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "paidAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.paidAt).not.toBeNull();
+  });
+
+  it("keeps a valid paid receipt from being flagged as reorged", async () => {
+    const hash = `0x${"8".repeat(63)}0`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1400000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1400000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1400000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ reorgDetectedAt: new Date() })
+      .where("status", "=", "paid")
+      .where("publicId", "!=", paymentIntent.publicId)
+      .execute();
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1400000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1400000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+    await reconcilePaidPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "reorgDetectedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.reorgDetectedAt).toBeNull();
+  });
+
+  it("does not record a reorg for a transiently missing receipt", async () => {
+    const hash = `0x${"8".repeat(63)}1`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1500000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ reorgDetectedAt: new Date() })
+      .where("status", "=", "paid")
+      .where("publicId", "!=", paymentIntent.publicId)
+      .execute();
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+    await reconcilePaidPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "reorgDetectedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.reorgDetectedAt).toBeNull();
+  });
+
+  it("records a reorg when a paid receipt is reverted", async () => {
+    const hash = `0x${"8".repeat(63)}2`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1600000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1600000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1600000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ reorgDetectedAt: new Date() })
+      .where("status", "=", "paid")
+      .where("publicId", "!=", paymentIntent.publicId)
+      .execute();
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1600000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x0",
+          logs: [],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+    await reconcilePaidPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "reorgDetectedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.reorgDetectedAt).not.toBeNull();
+  });
+
+  it("records a reorg when a paid receipt loses its Transfer log", async () => {
+    const hash = `0x${"8".repeat(63)}3`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1700000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1700000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1700000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ reorgDetectedAt: new Date() })
+      .where("status", "=", "paid")
+      .where("publicId", "!=", paymentIntent.publicId)
+      .execute();
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1700000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+    await reconcilePaidPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "reorgDetectedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.reorgDetectedAt).not.toBeNull();
+  });
+
+  it("records a reorg when both transaction and receipt disappear", async () => {
+    const hash = `0x${"8".repeat(63)}4`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "1800000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "1800000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x10",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "1800000")],
+        }),
+      getCurrentBlockNumber: () => Promise.resolve(0x1b),
+    });
+
+    await request(app)
+      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
+      .send({ transactionHash: hash });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/confirm`);
+
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ reorgDetectedAt: new Date() })
+      .where("status", "=", "paid")
+      .where("publicId", "!=", paymentIntent.publicId)
+      .execute();
+
+    setBaseTransactionProvider({
+      getTransaction: () => Promise.resolve(undefined),
+      getTransactionReceipt: () => Promise.resolve(undefined),
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+    await reconcilePaidPaymentIntents();
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "reorgDetectedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.reorgDetectedAt).not.toBeNull();
   });
 });
 
