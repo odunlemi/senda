@@ -3,7 +3,7 @@ import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
 
 import { logger } from "../lib/logger.js";
-import { BadRequestError, NotFoundError } from "../lib/errors.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../lib/errors.js";
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
@@ -20,6 +20,11 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
   if (err instanceof NotFoundError) {
     res.status(404).json({ success: false, error: err.message });
+    return;
+  }
+
+  if (err instanceof ConflictError) {
+    res.status(409).json({ success: false, error: err.message });
     return;
   }
 

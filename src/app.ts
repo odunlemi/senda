@@ -9,6 +9,7 @@ import { notFound } from "./middlewares/notFound.js";
 import { merchantsRouter } from "../services/merchants/merchants.routes.js";
 import { paymentIntentsRouter } from "../services/payment-intents/payment-intents.routes.js";
 import { checkoutRouter } from "../services/checkout/checkout.routes.js";
+import { receiptsRouter } from "../services/receipts/receipts.routes.js";
 
 export function createApp(): Express {
   const app = express();
@@ -24,6 +25,7 @@ export function createApp(): Express {
   app.use("/api", merchantsRouter);
   app.use("/api", paymentIntentsRouter);
   app.use("/api", checkoutRouter);
+  app.use("/api", receiptsRouter);
 
   app.use(notFound);
   app.use(errorHandler);

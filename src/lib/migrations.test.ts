@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { up as repairPaymentIntentMerchantOwnership } from "../../migrations/20260825010000_repair_payment_intent_merchant_ownership.js";
 import { up as normalizeTransactionHashes } from "../../migrations/20260825020000_normalize_transaction_hashes.js";
+import { up as backfillPaidAt } from "../../migrations/20260828030000_backfill_paid_at.js";
 
 describe("payment-intent merchant ownership migration", () => {
   let pglite: PGlite;
@@ -98,5 +99,43 @@ describe("transaction hash normalization migration", () => {
         values ('intent-2', ${`0x${"A".repeat(64)}`})
       `.execute(db),
     ).rejects.toThrow();
+  });
+});
+
+describe("paidAt backfill migration", () => {
+  let pglite: PGlite;
+  let db: Kysely<unknown>;
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    db = new Kysely({ dialect: new PGliteDialect({ pglite }) });
+
+    await sql`
+      create table "paymentIntents" (
+        "id" text not null primary key,
+        "status" text not null,
+        "paidAt" timestamptz,
+        "updatedAt" timestamptz not null
+      )
+    `.execute(db);
+
+    const updatedAt = new Date("2026-08-01T00:00:00.000Z");
+    await sql`
+      insert into "paymentIntents" ("id", "status", "updatedAt")
+      values ('paid-1', 'paid', ${updatedAt.toISOString()})
+    `.execute(db);
+
+    await backfillPaidAt(db);
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  it("backfills paidAt from updatedAt for existing paid rows", async () => {
+    const result = await sql<{ paidAt: Date; updatedAt: Date }>`
+      select "paidAt", "updatedAt" from "paymentIntents" where "id" = 'paid-1'
+    `.execute(db);
+    expect(result.rows[0]?.paidAt).toEqual(result.rows[0]?.updatedAt);
   });
 });
