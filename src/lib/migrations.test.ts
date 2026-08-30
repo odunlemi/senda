@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { up as repairPaymentIntentMerchantOwnership } from "../../migrations/20260825010000_repair_payment_intent_merchant_ownership.js";
 import { up as normalizeTransactionHashes } from "../../migrations/20260825020000_normalize_transaction_hashes.js";
 import { up as backfillPaidAt } from "../../migrations/20260828030000_backfill_paid_at.js";
+import { up as normalizeReceivingWalletAddresses } from "../../migrations/20260830020000_normalize_receiving_wallet_addresses.js";
 
 describe("payment-intent merchant ownership migration", () => {
   let pglite: PGlite;
@@ -137,5 +138,80 @@ describe("paidAt backfill migration", () => {
       select "paidAt", "updatedAt" from "paymentIntents" where "id" = 'paid-1'
     `.execute(db);
     expect(result.rows[0]?.paidAt).toEqual(result.rows[0]?.updatedAt);
+  });
+});
+
+describe("receiving wallet address normalization migration", () => {
+  let pglite: PGlite;
+  let db: Kysely<unknown>;
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    db = new Kysely({ dialect: new PGliteDialect({ pglite }) });
+
+    await sql`
+      create table "user" (
+        "id" text not null primary key,
+        "name" text not null,
+        "email" text not null unique,
+        "receivingWalletAddress" text
+      )
+    `.execute(db);
+    await sql`
+      insert into "user" ("id", "name", "email", "receivingWalletAddress")
+      values
+        ('merchant-1', 'One', 'one@example.com', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+        ('merchant-2', 'Two', 'two@example.com', '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
+    `.execute(db);
+    await normalizeReceivingWalletAddresses(db);
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  it("normalizes safe receiving addresses to lowercase", async () => {
+    const result = await sql<{ receivingWalletAddress: string }>`
+      select "receivingWalletAddress" from "user" where "id" = 'merchant-1'
+    `.execute(db);
+    expect(result.rows[0]?.receivingWalletAddress).toBe(
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+  });
+
+  it("rejects a case-insensitive collision without deleting data", async () => {
+    const collisionDb = new Kysely({ dialect: new PGliteDialect({ pglite: new PGlite() }) });
+    await sql`
+      create table "user" (
+        "id" text not null primary key,
+        "name" text not null,
+        "email" text not null unique,
+        "receivingWalletAddress" text
+      )
+    `.execute(collisionDb);
+    await sql`
+      insert into "user" ("id", "name", "email", "receivingWalletAddress")
+      values
+        ('merchant-1', 'One', 'one@example.com', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+        ('merchant-2', 'Two', 'two@example.com', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+    `.execute(collisionDb);
+
+    await expect(normalizeReceivingWalletAddresses(collisionDb)).rejects.toThrow();
+
+    const remaining = await sql<{ id: string }>`
+      select "id" from "user" order by "id"
+    `.execute(collisionDb);
+    expect(remaining.rows.map((r) => r.id)).toEqual(["merchant-1", "merchant-2"]);
+
+    await collisionDb.destroy();
+  });
+
+  it("rejects a differently-cased duplicate after the index is installed", async () => {
+    await expect(
+      sql`
+        insert into "user" ("id", "name", "email", "receivingWalletAddress")
+        values ('merchant-3', 'Three', 'three@example.com', '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB')
+      `.execute(db),
+    ).rejects.toThrow();
   });
 });

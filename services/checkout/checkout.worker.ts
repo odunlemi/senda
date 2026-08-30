@@ -1,8 +1,29 @@
+import { randomUUID } from "node:crypto";
+
+import type { PaymentReorgReason } from "../payment-intents/payment-intents.types.js";
 import { env } from "../../src/config/env.js";
 import { getDb } from "../../src/lib/db.js";
 import { logger } from "../../src/lib/logger.js";
-import { getBaseTransactionProvider } from "./checkout.provider.js";
+import {
+  getBaseTransactionProvider,
+  type BaseTransaction,
+  type BaseTransactionReceipt,
+} from "./checkout.provider.js";
 import { hasMatchingTransferLog, reconcileCheckout } from "./checkout.service.js";
+
+function classifyReorg(
+  transactionHash: string,
+  transaction: BaseTransaction | undefined,
+  receipt: BaseTransactionReceipt | undefined,
+  paymentIntent: { payerAddress: string | null; destinationAddress: string; amountAtomic: string },
+): PaymentReorgReason | null {
+  if (!transaction && !receipt) return "missing_transaction_and_receipt";
+  if (!receipt) return null;
+  if (receipt.transactionHash.toLowerCase() !== transactionHash) return "receipt_identity_changed";
+  if (receipt.status?.toLowerCase() !== "0x1") return "receipt_reverted";
+  if (!hasMatchingTransferLog(receipt, paymentIntent)) return "missing_transfer_log";
+  return null;
+}
 
 export async function reconcileConfirmingPaymentIntents(): Promise<void> {
   const intents = await getDb()
@@ -23,7 +44,15 @@ export async function reconcileConfirmingPaymentIntents(): Promise<void> {
 export async function reconcilePaidPaymentIntents(): Promise<void> {
   const intents = await getDb()
     .selectFrom("paymentIntents")
-    .select(["publicId", "transactionHash", "payerAddress", "destinationAddress", "amountAtomic"])
+    .select([
+      "id",
+      "merchantId",
+      "publicId",
+      "transactionHash",
+      "payerAddress",
+      "destinationAddress",
+      "amountAtomic",
+    ])
     .where("status", "=", "paid")
     .where("reorgDetectedAt", "is", null)
     .execute();
@@ -38,27 +67,42 @@ export async function reconcilePaidPaymentIntents(): Promise<void> {
         provider.getTransactionReceipt(intent.transactionHash),
       ]);
 
-      const isReorged =
-        (!transaction && !receipt) ||
-        (receipt !== undefined &&
-          (receipt.transactionHash.toLowerCase() !== intent.transactionHash ||
-            receipt.status?.toLowerCase() !== "0x1" ||
-            !hasMatchingTransferLog(receipt, intent)));
-
-      if (!isReorged) continue;
+      const reason = classifyReorg(intent.transactionHash, transaction, receipt, intent);
+      if (!reason) continue;
 
       const updated = await getDb()
-        .updateTable("paymentIntents")
-        .set({ reorgDetectedAt: new Date() })
-        .where("publicId", "=", intent.publicId)
-        .where("status", "=", "paid")
-        .where("reorgDetectedAt", "is", null)
-        .returning("publicId")
-        .executeTakeFirst();
+        .transaction()
+        .execute(async (trx) => {
+          const payment = await trx
+            .updateTable("paymentIntents")
+            .set({ reorgDetectedAt: new Date() })
+            .where("publicId", "=", intent.publicId)
+            .where("status", "=", "paid")
+            .where("reorgDetectedAt", "is", null)
+            .returning("publicId")
+            .executeTakeFirst();
+
+          if (!payment) return null;
+
+          await trx
+            .insertInto("auditEvents")
+            .values({
+              id: randomUUID(),
+              eventType: "payment.reorg_detected",
+              actorType: "system",
+              actorId: null,
+              merchantId: intent.merchantId,
+              paymentIntentId: intent.id,
+              metadata: { transactionHash: intent.transactionHash, reason },
+            })
+            .execute();
+
+          return payment;
+        });
 
       if (updated) {
         logger.warn(
-          { publicId: intent.publicId, transactionHash: intent.transactionHash },
+          { publicId: intent.publicId, transactionHash: intent.transactionHash, reason },
           "reorg detected on paid payment",
         );
       }

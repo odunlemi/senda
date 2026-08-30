@@ -1,6 +1,9 @@
-import request from "supertest";
-import { beforeAll, describe, expect, it } from "vitest";
+import crypto from "node:crypto";
 
+import request from "supertest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+
+import { getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 
 useTestDatabase();
@@ -122,6 +125,64 @@ describe("merchant access", () => {
     expect(paymentBody.data.paymentIntent.destinationAddress).toBe(wallet);
   });
 
+  it("records a receiving wallet change as an audit event", async () => {
+    const nextWallet = "0xcccccccccccccccccccccccccccccccccccccccc";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: nextWallet });
+
+    expect(response.status).toBe(200);
+
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+    const events = await getDb()
+      .selectFrom("auditEvents")
+      .selectAll()
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .orderBy("createdAt", "desc")
+      .execute();
+
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events[0]).toMatchObject({
+      actorType: "merchant",
+      actorId: merchant.id,
+      metadata: {
+        previousWalletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        newWalletAddress: nextWallet,
+      },
+    });
+  });
+
+  it("does not create an audit event for a no-op wallet update", async () => {
+    const previous = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({
+        receivingWalletAddress: "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      });
+
+    expect(response.status).toBe(200);
+
+    const current = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    expect(current.count).toBe(previous.count);
+  });
+
   it("returns 400 for invalid payment-link amounts and expiry", async () => {
     const cases = [
       { amountAtomic: "0", expiresAt: new Date(Date.now() + 60_000).toISOString() },
@@ -138,6 +199,12 @@ describe("merchant access", () => {
   });
 
   it("creates a payment link owned by the signed-in merchant", async () => {
+    const wallet = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
     const response = await request(app)
       .post("/api/payment-links")
       .set("Cookie", sessionCookie)
@@ -153,12 +220,162 @@ describe("merchant access", () => {
       data: { paymentIntent: Record<string, unknown> };
     };
     expect(body.data.paymentIntent).toMatchObject({
-      destinationAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      destinationAddress: wallet,
       amountAtomic: "1000000",
       asset: "USDC",
       chain: "base",
       approvalRequired: true,
     });
     expect(body.data.paymentIntent).not.toHaveProperty("merchantId");
+  });
+
+  it("commits one wallet-change audit event per concurrent different update", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select(["id", "receivingWalletAddress"])
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const before = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    const walletA = "0xdddddddddddddddddddddddddddddddddddddddd";
+    const walletB = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    await Promise.all([
+      request(app)
+        .put("/api/merchant-wallet")
+        .set("Cookie", sessionCookie)
+        .send({ receivingWalletAddress: walletA }),
+      request(app)
+        .put("/api/merchant-wallet")
+        .set("Cookie", sessionCookie)
+        .send({ receivingWalletAddress: walletB }),
+    ]);
+
+    const current = await getDb()
+      .selectFrom("user")
+      .select("receivingWalletAddress")
+      .where("id", "=", merchant.id)
+      .executeTakeFirstOrThrow();
+
+    const events = await getDb()
+      .selectFrom("auditEvents")
+      .selectAll()
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .orderBy("createdAt", "desc")
+      .execute();
+
+    const newCount = events.length - Number(before.count);
+    expect(newCount).toBe(2);
+    expect([walletA, walletB]).toContain(current.receivingWalletAddress);
+
+    const latestEvent = events[0];
+    const priorEvent = events[1];
+    if (!latestEvent || !priorEvent) {
+      throw new Error("expected two wallet-change audit events");
+    }
+
+    const latest = latestEvent.metadata as {
+      newWalletAddress: string;
+      previousWalletAddress: string;
+    };
+    const prior = priorEvent.metadata as {
+      newWalletAddress: string;
+      previousWalletAddress: string;
+    };
+    expect(latest).toMatchObject({
+      newWalletAddress: current.receivingWalletAddress,
+      previousWalletAddress: prior.newWalletAddress,
+    });
+    expect(prior.previousWalletAddress).toBe(merchant.receivingWalletAddress);
+  });
+
+  it("does not create concurrent no-op wallet updates", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select(["id", "receivingWalletAddress"])
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const wallet = merchant.receivingWalletAddress;
+    if (!wallet) throw new Error("expected receiving wallet address to be set");
+
+    const before = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    await Promise.all([
+      request(app).put("/api/merchant-wallet").set("Cookie", sessionCookie).send({
+        receivingWalletAddress: wallet,
+      }),
+      request(app).put("/api/merchant-wallet").set("Cookie", sessionCookie).send({
+        receivingWalletAddress: wallet.toUpperCase(),
+      }),
+    ]);
+
+    const current = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    expect(current.count).toBe(before.count);
+  });
+
+  it("rolls back the wallet update when the audit event insertion fails", async () => {
+    const mockRandomUUID = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValue("00000000-0000-0000-0000-000000000001");
+
+    try {
+      const merchant = await getDb()
+        .selectFrom("user")
+        .select(["id", "receivingWalletAddress"])
+        .where("email", "=", email)
+        .executeTakeFirstOrThrow();
+
+      await getDb()
+        .insertInto("auditEvents")
+        .values({
+          id: crypto.randomUUID(),
+          eventType: "merchant.receiving_wallet_changed",
+          actorType: "merchant",
+          actorId: merchant.id,
+          merchantId: merchant.id,
+          paymentIntentId: null,
+          metadata: { test: true },
+        })
+        .execute();
+
+      const beforeWallet = merchant.receivingWalletAddress;
+      const response = await request(app)
+        .put("/api/merchant-wallet")
+        .set("Cookie", sessionCookie)
+        .send({
+          receivingWalletAddress: "0xffffffffffffffffffffffffffffffffffffffff",
+        });
+
+      expect(response.status).toBeGreaterThanOrEqual(500);
+
+      const after = await getDb()
+        .selectFrom("user")
+        .select("receivingWalletAddress")
+        .where("id", "=", merchant.id)
+        .executeTakeFirstOrThrow();
+
+      expect(after.receivingWalletAddress).toBe(beforeWallet);
+    } finally {
+      mockRandomUUID.mockRestore();
+    }
   });
 });

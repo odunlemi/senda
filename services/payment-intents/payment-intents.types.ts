@@ -5,6 +5,12 @@ import type { SendaAsset, SendaChain } from "../../src/config/payment.js";
 export type PaymentIntentStatus =
   "created" | "awaiting_payment" | "confirming" | "paid" | "expired" | "failed" | "dropped";
 
+export type PaymentReorgReason =
+  | "missing_transaction_and_receipt"
+  | "receipt_identity_changed"
+  | "receipt_reverted"
+  | "missing_transfer_log";
+
 export interface PaymentIntentsTable {
   id: string;
   merchantId: string;

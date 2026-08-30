@@ -10,6 +10,7 @@ import {
 } from "../../contracts/merchants.js";
 import { getDb } from "../../src/lib/db.js";
 import { getMerchantAuth } from "./merchants.config.js";
+import { setMerchantWallet as setMerchantWalletService } from "./merchants.service.js";
 
 function forwardAuthCookies(res: Response, headers: Headers): void {
   const cookies = headers.getSetCookie();
@@ -96,12 +97,9 @@ export const setMerchantWallet: RequestHandler = async (req, res) => {
     return;
   }
   const body = merchantWalletSchema.parse(req.body);
-  await getDb()
-    .updateTable("user")
-    .set({ receivingWalletAddress: body.receivingWalletAddress, updatedAt: new Date() })
-    .where("id", "=", merchantId)
-    .executeTakeFirstOrThrow();
-  res
-    .status(200)
-    .json({ success: true, data: { receivingWalletAddress: body.receivingWalletAddress } });
+  const receivingWalletAddress = await setMerchantWalletService(
+    merchantId,
+    body.receivingWalletAddress,
+  );
+  res.status(200).json({ success: true, data: { receivingWalletAddress } });
 };

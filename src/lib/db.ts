@@ -2,6 +2,7 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 
 import { env } from "../config/env.js";
+import type { AuditEventsTable } from "../../services/audit/audit-events.types.js";
 import type { PaymentIntentsTable } from "../../services/payment-intents/payment-intents.types.js";
 import type { MerchantsTable } from "../../services/merchants/merchants.types.js";
 
@@ -14,6 +15,7 @@ import type { MerchantsTable } from "../../services/merchants/merchants.types.js
 export interface Database {
   paymentIntents: PaymentIntentsTable;
   user: MerchantsTable;
+  auditEvents: AuditEventsTable;
 }
 
 let instance: Kysely<Database> = new Kysely<Database>({
