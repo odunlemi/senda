@@ -92,6 +92,12 @@ The limiter uses an in-memory store. This is correct for the current single
 API process, but a shared external store such as Redis is required before
 running multiple API instances behind a load balancer.
 
+Merchant sessions are valid for their full lifetime, but a session is only
+considered fresh for `MERCHANT_SESSION_FRESH_AGE_SECONDS` (default 300). The
+`PUT /api/merchant-wallet` endpoint requires a fresh session; a 403 response
+means the merchant must reauthenticate through `POST /api/merchant-sessions`
+and then retry the wallet request without including the password.
+
 ## Deploying
 
 `railway.json` configures the build, migrations, start command, and health

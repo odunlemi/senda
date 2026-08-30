@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 
 import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { sql } from "kysely";
 
+import { env } from "../../src/config/env.js";
 import { getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 
@@ -156,6 +158,38 @@ describe("merchant access", () => {
         newWalletAddress: nextWallet,
       },
     });
+  });
+
+  it("rejects wallet changes with a stale session", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const stale = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS + 1) * 1000);
+    await sql`update "session" set "createdAt" = ${stale} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const wallet = "0x9999999999999999999999999999999999999999";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
+    expect(response.status).toBe(403);
+
+    const current = await getDb()
+      .selectFrom("user")
+      .select("receivingWalletAddress")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+    expect(current.receivingWalletAddress).not.toBe(wallet);
+
+    await sql`update "session" set "createdAt" = ${new Date()} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
   });
 
   it("does not create an audit event for a no-op wallet update", async () => {
@@ -333,21 +367,21 @@ describe("merchant access", () => {
   });
 
   it("rolls back the wallet update when the audit event insertion fails", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select(["id", "receivingWalletAddress"])
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
     const mockRandomUUID = vi
       .spyOn(crypto, "randomUUID")
-      .mockReturnValue("00000000-0000-0000-0000-000000000001");
+      .mockImplementation(() => "00000000-0000-0000-0000-000000000001");
 
     try {
-      const merchant = await getDb()
-        .selectFrom("user")
-        .select(["id", "receivingWalletAddress"])
-        .where("email", "=", email)
-        .executeTakeFirstOrThrow();
-
       await getDb()
         .insertInto("auditEvents")
         .values({
-          id: crypto.randomUUID(),
+          id: "00000000-0000-0000-0000-000000000001",
           eventType: "merchant.receiving_wallet_changed",
           actorType: "merchant",
           actorId: merchant.id,
@@ -358,6 +392,10 @@ describe("merchant access", () => {
         .execute();
 
       const beforeWallet = merchant.receivingWalletAddress;
+      await sql`update "session" set "createdAt" = ${new Date()} where "userId" = ${merchant.id}`.execute(
+        getDb(),
+      );
+
       const response = await request(app)
         .put("/api/merchant-wallet")
         .set("Cookie", sessionCookie)
@@ -377,5 +415,192 @@ describe("merchant access", () => {
     } finally {
       mockRandomUUID.mockRestore();
     }
+  });
+});
+
+describe("fresh session enforcement", () => {
+  const email = `fresh-merchant-${Date.now()}@example.com`;
+  const password = "SuperSecret123!";
+  let sessionCookie: string;
+
+  beforeAll(async () => {
+    const register = await request(app)
+      .post("/api/merchants")
+      .send({ name: "Fresh Merchant", email, password });
+    expect(register.status).toBe(201);
+
+    const signIn = await request(app).post("/api/merchant-sessions").send({ email, password });
+    expect(signIn.status).toBe(201);
+    sessionCookie = requireSessionCookie(signIn);
+  });
+
+  it("accepts a wallet change from a fresh session", async () => {
+    const wallet = "0x0101010101010101010101010101010101010101";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
+    expect(response.status).toBe(200);
+    expect(
+      (response.body as { data: { receivingWalletAddress: string } }).data.receivingWalletAddress,
+    ).toBe(wallet);
+  });
+
+  it("rejects a wallet change just past the freshness boundary", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const stale = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS + 1) * 1000);
+    await sql`update "session" set "createdAt" = ${stale} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({
+        receivingWalletAddress: "0x0202020202020202020202020202020202020202",
+      });
+
+    expect(response.status).toBe(403);
+  });
+
+  it("rejects a wallet change just inside the freshness boundary", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const near = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS - 1) * 1000);
+    await sql`update "session" set "createdAt" = ${near} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const wallet = "0x0303030303030303030303030303030303030303";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
+    expect(response.status).toBe(200);
+    expect(
+      (response.body as { data: { receivingWalletAddress: string } }).data.receivingWalletAddress,
+    ).toBe(wallet);
+  });
+
+  it("does not change state or create audit events on a stale attempt", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select(["id", "receivingWalletAddress"])
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const beforeCount = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    const stale = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS + 1) * 1000);
+    await sql`update "session" set "createdAt" = ${stale} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const wallet = "0x0404040404040404040404040404040404040404";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({ receivingWalletAddress: wallet });
+
+    expect(response.status).toBe(403);
+
+    const after = await getDb()
+      .selectFrom("user")
+      .select("receivingWalletAddress")
+      .where("id", "=", merchant.id)
+      .executeTakeFirstOrThrow();
+    expect(after.receivingWalletAddress).toBe(merchant.receivingWalletAddress);
+
+    const afterCount = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    expect(afterCount.count).toBe(beforeCount.count);
+  });
+
+  it("allows ordinary session endpoints to use a stale but valid session", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const stale = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS + 1) * 1000);
+    await sql`update "session" set "createdAt" = ${stale} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const response = await request(app)
+      .get("/api/merchant-sessions/current")
+      .set("Cookie", sessionCookie);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("reauthenticates through the sign-in endpoint and retries with a fresh session", async () => {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select("id")
+      .where("email", "=", email)
+      .executeTakeFirstOrThrow();
+
+    const stale = new Date(Date.now() - (env.MERCHANT_SESSION_FRESH_AGE_SECONDS + 1) * 1000);
+    await sql`update "session" set "createdAt" = ${stale} where "userId" = ${merchant.id}`.execute(
+      getDb(),
+    );
+
+    const beforeCount = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    const staleResponse = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", sessionCookie)
+      .send({
+        receivingWalletAddress: "0x0505050505050505050505050505050505050505",
+      });
+    expect(staleResponse.status).toBe(403);
+
+    const signIn = await request(app).post("/api/merchant-sessions").send({ email, password });
+    expect(signIn.status).toBe(201);
+    const freshCookie = requireSessionCookie(signIn);
+
+    const wallet = "0x0606060606060606060606060606060606060606";
+    const response = await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", freshCookie)
+      .send({ receivingWalletAddress: wallet });
+    expect(response.status).toBe(200);
+
+    const afterCount = await getDb()
+      .selectFrom("auditEvents")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("merchantId", "=", merchant.id)
+      .where("eventType", "=", "merchant.receiving_wallet_changed")
+      .executeTakeFirstOrThrow();
+
+    expect(Number(afterCount.count) - Number(beforeCount.count)).toBe(1);
   });
 });

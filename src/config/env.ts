@@ -34,6 +34,11 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(60 * 1000),
+  MERCHANT_SESSION_FRESH_AGE_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(5 * 60),
 });
 
 export const env = envSchema.parse(process.env);

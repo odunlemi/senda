@@ -11,6 +11,9 @@ function buildMerchantAuth() {
     },
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
+    session: {
+      freshAge: env.MERCHANT_SESSION_FRESH_AGE_SECONDS,
+    },
     emailAndPassword: {
       enabled: true,
     },

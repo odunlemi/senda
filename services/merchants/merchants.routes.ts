@@ -11,7 +11,7 @@ import {
   readCurrentMerchant,
   setMerchantWallet,
 } from "./merchants.controller.js";
-import { requireMerchantSession } from "./merchants.middleware.js";
+import { requireFreshMerchantSession, requireMerchantSession } from "./merchants.middleware.js";
 
 export const merchantsRouter = Router();
 
@@ -21,7 +21,7 @@ merchantsRouter.get("/merchant-sessions/current", requireMerchantSession, readCu
 merchantsRouter.put(
   "/merchant-wallet",
   ipPublicRateLimit,
-  requireMerchantSession,
+  requireFreshMerchantSession,
   merchantRateLimit,
   setMerchantWallet,
 );
