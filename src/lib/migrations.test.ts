@@ -6,6 +6,7 @@ import { up as repairPaymentIntentMerchantOwnership } from "../../migrations/202
 import { up as normalizeTransactionHashes } from "../../migrations/20260825020000_normalize_transaction_hashes.js";
 import { up as backfillPaidAt } from "../../migrations/20260828030000_backfill_paid_at.js";
 import { up as normalizeReceivingWalletAddresses } from "../../migrations/20260830020000_normalize_receiving_wallet_addresses.js";
+import { up as addWalletChangeRequests } from "../../migrations/20260831010000_add_wallet_change_requests.js";
 
 describe("payment-intent merchant ownership migration", () => {
   let pglite: PGlite;
@@ -213,5 +214,215 @@ describe("receiving wallet address normalization migration", () => {
         values ('merchant-3', 'Three', 'three@example.com', '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB')
       `.execute(db),
     ).rejects.toThrow();
+  });
+});
+
+describe("wallet change requests migration", () => {
+  let pglite: PGlite;
+  let db: Kysely<unknown>;
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    db = new Kysely({ dialect: new PGliteDialect({ pglite }) });
+
+    await sql`
+      create table "user" (
+        "id" text not null primary key,
+        "name" text not null,
+        "email" text not null unique,
+        "receivingWalletAddress" text
+      )
+    `.execute(db);
+
+    await sql`
+      create table "auditEvents" (
+        "id" text not null primary key,
+        "eventType" text not null,
+        "actorType" text not null,
+        "actorId" text,
+        "merchantId" text,
+        "paymentIntentId" text,
+        "metadata" jsonb,
+        "createdAt" timestamptz not null default current_timestamp
+      )
+    `.execute(db);
+
+    await sql`
+      insert into "user" ("id", "name", "email")
+      values ('merchant-1', 'One', 'one@example.com'),
+        ('merchant-2', 'Two', 'two@example.com')
+    `.execute(db);
+
+    await addWalletChangeRequests(db);
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  it("requires activationAt to be on or after requestedAt", async () => {
+    const past = new Date(Date.now() - 1000);
+    const furtherPast = new Date(Date.now() - 2000);
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-1', 'merchant-1', '0x1111111111111111111111111111111111111111',
+          '0x2222222222222222222222222222222222222222', 'pending',
+          ${past}, ${furtherPast}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("rejects invalid or non-distinct previous and requested addresses", async () => {
+    const now = new Date();
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-2', 'merchant-1', 'invalid', '0x2222222222222222222222222222222222222222',
+          'pending', ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-3', 'merchant-1', '0x2222222222222222222222222222222222222222',
+          '0x2222222222222222222222222222222222222222',
+          'pending', ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("enforces one pending request per merchant", async () => {
+    const now = new Date();
+    await sql`
+      insert into "walletChangeRequests" (
+        "id", "merchantId", "previousAddress", "requestedAddress", "status",
+        "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+      )
+      values (
+        'req-4', 'merchant-1', '0x1111111111111111111111111111111111111111',
+        '0x2222222222222222222222222222222222222222', 'pending',
+        ${now}, ${now}, null, null
+      )
+    `.execute(db);
+
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-5', 'merchant-1', '0x1111111111111111111111111111111111111111',
+          '0x3333333333333333333333333333333333333333', 'pending',
+          ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("enforces one pending request per address", async () => {
+    const now = new Date();
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-6', 'merchant-2', '0x1111111111111111111111111111111111111111',
+          '0x2222222222222222222222222222222222222222', 'pending',
+          ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("requires terminal timestamps to match the status", async () => {
+    const now = new Date();
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-7', 'merchant-2', '0x1111111111111111111111111111111111111111',
+          '0x3333333333333333333333333333333333333333', 'cancelled',
+          ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-8', 'merchant-2', '0x1111111111111111111111111111111111111111',
+          '0x3333333333333333333333333333333333333333', 'applied',
+          ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("cascades request rows when the merchant is deleted", async () => {
+    await sql`delete from "user" where "id" = 'merchant-1'`.execute(db);
+
+    const remaining = await sql<{ id: string }>`
+      select "id" from "walletChangeRequests" where "merchantId" = 'merchant-1'
+    `.execute(db);
+    expect(remaining.rows.length).toBe(0);
+  });
+
+  it("rejects mixed-case request addresses", async () => {
+    const now = new Date();
+    await expect(
+      sql`
+        insert into "walletChangeRequests" (
+          "id", "merchantId", "previousAddress", "requestedAddress", "status",
+          "requestedAt", "activationAt", "cancelledAt", "appliedAt"
+        )
+        values (
+          'req-9', 'merchant-2', '0x1111111111111111111111111111111111111111',
+          '0x222222222222222222222222222222222222222A', 'pending',
+          ${now}, ${now}, null, null
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("creates the partial due-work index on activationAt for pending rows", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      select "indexname", "indexdef" from pg_indexes
+      where "tablename" = 'walletChangeRequests'
+    `.execute(db);
+    const index = result.rows.find(
+      (r) => r.indexname === "walletChangeRequests_activationAt_pending_idx",
+    );
+    expect(index).toBeDefined();
+    expect(index?.indexdef).toContain("activationAt");
+    expect(index?.indexdef.toLowerCase()).toContain("where");
+    expect(index?.indexdef.toLowerCase()).toContain("status");
+    expect(index?.indexdef.toLowerCase()).toContain("pending");
   });
 });

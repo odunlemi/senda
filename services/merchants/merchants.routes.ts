@@ -6,9 +6,11 @@ import {
   merchantRateLimit,
 } from "../../src/middlewares/rate-limit.js";
 import {
+  cancelPendingWalletChangeController,
   createMerchant,
   createMerchantSession,
   readCurrentMerchant,
+  readPendingWalletChange,
   setMerchantWallet,
 } from "./merchants.controller.js";
 import { requireFreshMerchantSession, requireMerchantSession } from "./merchants.middleware.js";
@@ -24,4 +26,17 @@ merchantsRouter.put(
   requireFreshMerchantSession,
   merchantRateLimit,
   setMerchantWallet,
+);
+merchantsRouter.get(
+  "/merchant-wallet/pending",
+  requireMerchantSession,
+  merchantRateLimit,
+  readPendingWalletChange,
+);
+merchantsRouter.delete(
+  "/merchant-wallet/pending",
+  ipPublicRateLimit,
+  requireFreshMerchantSession,
+  merchantRateLimit,
+  cancelPendingWalletChangeController,
 );

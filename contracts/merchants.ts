@@ -37,3 +37,23 @@ export const merchantWalletSchema = z.object({
     .trim()
     .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid receiving wallet address"),
 });
+
+export const merchantWalletResponseSchema = z.object({
+  success: z.literal(true),
+  data: z.object({
+    receivingWalletAddress: z.string(),
+  }),
+});
+
+export const merchantWalletChangeResponseSchema = z.object({
+  success: z.literal(true),
+  data: z.object({
+    requestedAddress: z.string(),
+    previousAddress: z.string(),
+    status: z.enum(["pending", "cancelled", "applied"]),
+    activationAt: z.iso.datetime(),
+    requestedAt: z.iso.datetime(),
+    cancelledAt: z.iso.datetime().optional(),
+    appliedAt: z.iso.datetime().optional(),
+  }),
+});

@@ -94,9 +94,14 @@ running multiple API instances behind a load balancer.
 
 Merchant sessions are valid for their full lifetime, but a session is only
 considered fresh for `MERCHANT_SESSION_FRESH_AGE_SECONDS` (default 300). The
-`PUT /api/merchant-wallet` endpoint requires a fresh session; a 403 response
-means the merchant must reauthenticate through `POST /api/merchant-sessions`
-and then retry the wallet request without including the password.
+`PUT /api/merchant-wallet` and `DELETE /api/merchant-wallet/pending` endpoints
+require a fresh session; a 403 response means the merchant must reauthenticate
+through `POST /api/merchant-sessions` and then retry the request.
+
+Replacing an already-configured receiving wallet creates a pending change that
+becomes active after `MERCHANT_WALLET_CHANGE_DELAY_SECONDS` (default 86400).
+Payment links created during the delay continue to use the previous address,
+and the merchant can cancel the pending request until it is applied.
 
 ## Deploying
 

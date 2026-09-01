@@ -4,7 +4,10 @@ import { Pool } from "pg";
 import { env } from "../config/env.js";
 import type { AuditEventsTable } from "../../services/audit/audit-events.types.js";
 import type { PaymentIntentsTable } from "../../services/payment-intents/payment-intents.types.js";
-import type { MerchantsTable } from "../../services/merchants/merchants.types.js";
+import type {
+  MerchantsTable,
+  WalletChangeRequestsTable,
+} from "../../services/merchants/merchants.types.js";
 
 /**
  * Grows as each domain adds its own tables (payment intents, receipts, etc.).
@@ -16,6 +19,7 @@ export interface Database {
   paymentIntents: PaymentIntentsTable;
   user: MerchantsTable;
   auditEvents: AuditEventsTable;
+  walletChangeRequests: WalletChangeRequestsTable;
 }
 
 let instance: Kysely<Database> = new Kysely<Database>({

@@ -39,6 +39,11 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(5 * 60),
+  MERCHANT_WALLET_CHANGE_DELAY_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(24 * 60 * 60),
 });
 
 export const env = envSchema.parse(process.env);

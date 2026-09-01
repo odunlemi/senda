@@ -1,6 +1,11 @@
 import type { Generated, Selectable } from "kysely";
 
-export type AuditEventType = "merchant.receiving_wallet_changed" | "payment.reorg_detected";
+export type AuditEventType =
+  | "merchant.receiving_wallet_changed"
+  | "payment.reorg_detected"
+  | "merchant.receiving_wallet_change_requested"
+  | "merchant.receiving_wallet_change_cancelled"
+  | "merchant.receiving_wallet_change_applied";
 
 export type AuditActorType = "merchant" | "system";
 
