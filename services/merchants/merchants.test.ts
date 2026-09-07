@@ -645,6 +645,34 @@ describe("delayed wallet replacement", () => {
     return { email, cookie, id: merchant.id, active: wallet };
   }
 
+  async function transitionSnapshot(merchantId: string) {
+    const merchant = await getDb()
+      .selectFrom("user")
+      .select(["receivingWalletAddress", "updatedAt"])
+      .where("id", "=", merchantId)
+      .executeTakeFirstOrThrow();
+    const requests = await getDb()
+      .selectFrom("walletChangeRequests")
+      .selectAll()
+      .where("merchantId", "=", merchantId)
+      .orderBy("id")
+      .execute();
+    const audits = await getDb()
+      .selectFrom("auditEvents")
+      .selectAll()
+      .where("merchantId", "=", merchantId)
+      .where("eventType", "in", [
+        "merchant.receiving_wallet_changed",
+        "merchant.receiving_wallet_change_requested",
+        "merchant.receiving_wallet_change_cancelled",
+        "merchant.receiving_wallet_change_applied",
+      ])
+      .orderBy("id")
+      .execute();
+
+    return { merchant, requests, audits };
+  }
+
   it("returns 202 with a pending address and activation timestamp", async () => {
     const { cookie, active } = await freshMerchant();
     const requested = randomAddress();
@@ -1364,12 +1392,7 @@ describe("delayed wallet replacement", () => {
       })
       .execute();
 
-    const beforeRequestCount = await getDb()
-      .selectFrom("walletChangeRequests")
-      .select(({ fn }) => [fn.count("id").as("count")])
-      .where("merchantId", "=", id)
-      .where("status", "=", "pending")
-      .executeTakeFirstOrThrow();
+    const before = await transitionSnapshot(id);
 
     const mock = vi
       .spyOn(crypto, "randomUUID")
@@ -1386,20 +1409,8 @@ describe("delayed wallet replacement", () => {
       mock.mockRestore();
     }
 
-    const afterActive = await getDb()
-      .selectFrom("user")
-      .select("receivingWalletAddress")
-      .where("id", "=", id)
-      .executeTakeFirstOrThrow();
-    expect(afterActive.receivingWalletAddress).toBe(active);
-
-    const afterRequestCount = await getDb()
-      .selectFrom("walletChangeRequests")
-      .select(({ fn }) => [fn.count("id").as("count")])
-      .where("merchantId", "=", id)
-      .where("status", "=", "pending")
-      .executeTakeFirstOrThrow();
-    expect(afterRequestCount.count).toBe(beforeRequestCount.count);
+    expect(before.merchant.receivingWalletAddress).toBe(active);
+    expect(await transitionSnapshot(id)).toEqual(before);
   });
 
   it("rolls back a cancellation when the audit event insertion fails", async () => {
@@ -1434,6 +1445,8 @@ describe("delayed wallet replacement", () => {
       })
       .execute();
 
+    const before = await transitionSnapshot(id);
+
     const mock = vi.spyOn(crypto, "randomUUID").mockReturnValueOnce(duplicateAuditId);
 
     try {
@@ -1445,20 +1458,8 @@ describe("delayed wallet replacement", () => {
       mock.mockRestore();
     }
 
-    const changeRequest = await getDb()
-      .selectFrom("walletChangeRequests")
-      .selectAll()
-      .where("id", "=", requestId)
-      .executeTakeFirstOrThrow();
-    expect(changeRequest.status).toBe("pending");
-
-    const cancelledEvents = await getDb()
-      .selectFrom("auditEvents")
-      .select(({ fn }) => [fn.count("id").as("count")])
-      .where("merchantId", "=", id)
-      .where("eventType", "=", "merchant.receiving_wallet_change_cancelled")
-      .executeTakeFirstOrThrow();
-    expect(cancelledEvents.count).toBe(0);
+    expect(before.requests.find((row) => row.id === requestId)?.status).toBe("pending");
+    expect(await transitionSnapshot(id)).toEqual(before);
   });
 
   it("rolls back an application when the audit event insertion fails", async () => {
@@ -1498,6 +1499,8 @@ describe("delayed wallet replacement", () => {
       })
       .execute();
 
+    const before = await transitionSnapshot(id);
+
     const mock = vi.spyOn(crypto, "randomUUID").mockReturnValueOnce(duplicateAuditId);
 
     try {
@@ -1506,27 +1509,113 @@ describe("delayed wallet replacement", () => {
       mock.mockRestore();
     }
 
-    const active = await getDb()
-      .selectFrom("user")
-      .select("receivingWalletAddress")
-      .where("id", "=", id)
-      .executeTakeFirstOrThrow();
-    expect(active.receivingWalletAddress).not.toBe(requested);
+    expect(before.merchant.receivingWalletAddress).not.toBe(requested);
+    expect(before.requests.find((row) => row.id === requestId)?.status).toBe("pending");
+    expect(await transitionSnapshot(id)).toEqual(before);
+  });
 
-    const changeRequest = await getDb()
+  it("rolls back application when the second audit insertion fails", async () => {
+    const { cookie, id } = await freshMerchant();
+    const requested = randomAddress();
+    await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", cookie)
+      .send({ receivingWalletAddress: requested });
+
+    const requestId = (
+      await getDb()
+        .selectFrom("walletChangeRequests")
+        .select("id")
+        .where("merchantId", "=", id)
+        .where("status", "=", "pending")
+        .executeTakeFirstOrThrow()
+    ).id;
+    const due = new Date(Date.now() - 1000);
+    await getDb()
+      .updateTable("walletChangeRequests")
+      .set({ requestedAt: new Date(due.getTime() - 4000), activationAt: due })
+      .where("id", "=", requestId)
+      .execute();
+
+    const duplicateAuditId = "00000000-0000-0000-0000-000000000050";
+    await getDb()
+      .insertInto("auditEvents")
+      .values({
+        id: duplicateAuditId,
+        eventType: "payment.reorg_detected",
+        actorType: "system",
+        actorId: null,
+        merchantId: id,
+        paymentIntentId: "00000000-0000-0000-0000-000000000051",
+        metadata: { test: true },
+      })
+      .execute();
+
+    const before = await transitionSnapshot(id);
+    const mock = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("00000000-0000-0000-0000-000000000052")
+      .mockReturnValueOnce(duplicateAuditId);
+
+    try {
+      await expect(applyWalletChangeRequest(requestId)).rejects.toThrow();
+    } finally {
+      mock.mockRestore();
+    }
+
+    expect(await transitionSnapshot(id)).toEqual(before);
+  });
+
+  it("rolls back system cancellation when its audit insertion fails", async () => {
+    const first = await freshMerchant();
+    const second = await freshMerchant();
+    const requested = randomAddress();
+    await request(app)
+      .put("/api/merchant-wallet")
+      .set("Cookie", first.cookie)
+      .send({ receivingWalletAddress: requested });
+
+    const requestRow = await getDb()
       .selectFrom("walletChangeRequests")
       .selectAll()
-      .where("id", "=", requestId)
+      .where("merchantId", "=", first.id)
+      .where("status", "=", "pending")
       .executeTakeFirstOrThrow();
-    expect(changeRequest.status).toBe("pending");
+    const due = new Date(Date.now() - 1000);
+    await getDb()
+      .updateTable("walletChangeRequests")
+      .set({
+        requestedAddress: second.active,
+        requestedAt: new Date(due.getTime() - 4000),
+        activationAt: due,
+      })
+      .where("id", "=", requestRow.id)
+      .execute();
 
-    const appliedEvents = await getDb()
-      .selectFrom("auditEvents")
-      .select(({ fn }) => [fn.count("id").as("count")])
-      .where("merchantId", "=", id)
-      .where("eventType", "=", "merchant.receiving_wallet_change_applied")
-      .executeTakeFirstOrThrow();
-    expect(appliedEvents.count).toBe(0);
+    const duplicateAuditId = "00000000-0000-0000-0000-000000000060";
+    await getDb()
+      .insertInto("auditEvents")
+      .values({
+        id: duplicateAuditId,
+        eventType: "payment.reorg_detected",
+        actorType: "system",
+        actorId: null,
+        merchantId: first.id,
+        paymentIntentId: "00000000-0000-0000-0000-000000000061",
+        metadata: { test: true },
+      })
+      .execute();
+
+    const before = await transitionSnapshot(first.id);
+    const mock = vi.spyOn(crypto, "randomUUID").mockReturnValueOnce(duplicateAuditId);
+
+    try {
+      await expect(applyWalletChangeRequest(requestRow.id)).rejects.toThrow();
+    } finally {
+      mock.mockRestore();
+    }
+
+    expect(await transitionSnapshot(first.id)).toEqual(before);
   });
 
   it("retries a due request after an unexpected worker failure", async () => {

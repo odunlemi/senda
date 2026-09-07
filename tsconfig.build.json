@@ -6,6 +6,7 @@
     "**/*.test.ts",
     "**/*.eval.test.ts",
     "vitest.config.ts",
+    "vitest.postgres.config.ts",
     "vitest.setup.ts",
     "src/lib/testing.ts"
   ]

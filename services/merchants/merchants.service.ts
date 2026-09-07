@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { env } from "../../src/config/env.js";
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import { ConflictError, conflict, notFound } from "../../src/lib/errors.js";
 import { sql } from "kysely";
 import type { Transaction } from "kysely";
@@ -52,11 +52,6 @@ async function insertAuditEvent(
       metadata: values.metadata,
     })
     .execute();
-}
-
-async function dbNow(trx: Transaction<Database>): Promise<Date> {
-  const result = await sql<{ now: Date }>`select now() as now`.execute(trx);
-  return result.rows[0]?.now ?? new Date();
 }
 
 function addressEqualsColumn(column: string, address: string) {
@@ -123,10 +118,12 @@ export async function setOrRequestMerchantWallet(
 
       await assertAddressNotInUse(trx, merchantId, canonicalAddress);
 
+      const now = await getDatabaseTime(trx);
+
       if (merchant.receivingWalletAddress === null) {
         await trx
           .updateTable("user")
-          .set({ receivingWalletAddress: canonicalAddress, updatedAt: new Date() })
+          .set({ receivingWalletAddress: canonicalAddress, updatedAt: now })
           .where("id", "=", merchantId)
           .executeTakeFirstOrThrow();
 
@@ -160,7 +157,6 @@ export async function setOrRequestMerchantWallet(
         conflict("A pending wallet change already exists");
       }
 
-      const now = await dbNow(trx);
       const activationAt = new Date(
         now.getTime() + env.MERCHANT_WALLET_CHANGE_DELAY_SECONDS * 1000,
       );
@@ -224,18 +220,26 @@ export async function cancelPendingWalletChange(
         .forUpdate()
         .executeTakeFirstOrThrow();
 
-      const now = await dbNow(trx);
+      const pending = await trx
+        .selectFrom("walletChangeRequests")
+        .select("id")
+        .where("merchantId", "=", merchantId)
+        .where("status", "=", "pending")
+        .forUpdate()
+        .executeTakeFirst();
+
+      if (!pending) {
+        notFound("No pending wallet change request");
+      }
+
+      const now = await getDatabaseTime(trx);
       const request = await trx
         .updateTable("walletChangeRequests")
         .set({ status: "cancelled", cancelledAt: now, updatedAt: now })
-        .where("merchantId", "=", merchantId)
+        .where("id", "=", pending.id)
         .where("status", "=", "pending")
         .returningAll()
-        .executeTakeFirst();
-
-      if (!request) {
-        notFound("No pending wallet change request");
-      }
+        .executeTakeFirstOrThrow();
 
       await insertAuditEvent(trx, {
         eventType: "merchant.receiving_wallet_change_cancelled",
@@ -275,15 +279,6 @@ export async function applyWalletChangeRequest(
         notFound("Wallet change request not found");
       }
 
-      if (loaded.status !== "pending") {
-        return { kind: "already-terminal", request: loaded };
-      }
-
-      const now = await dbNow(trx);
-      if (loaded.activationAt.getTime() > now.getTime()) {
-        return { kind: "not-due", request: loaded };
-      }
-
       await trx
         .selectFrom("user")
         .select("id")
@@ -308,6 +303,11 @@ export async function applyWalletChangeRequest(
           .where("id", "=", requestId)
           .executeTakeFirstOrThrow();
         return { kind: "already-terminal", request: current };
+      }
+
+      const now = await getDatabaseTime(trx);
+      if (request.activationAt.getTime() > now.getTime()) {
+        return { kind: "not-due", request };
       }
 
       const merchant = await trx
@@ -383,7 +383,7 @@ export async function applyWalletChangeRequest(
 
       await trx
         .updateTable("user")
-        .set({ receivingWalletAddress: request.requestedAddress, updatedAt: new Date() })
+        .set({ receivingWalletAddress: request.requestedAddress, updatedAt: now })
         .where("id", "=", request.merchantId)
         .executeTakeFirstOrThrow();
 

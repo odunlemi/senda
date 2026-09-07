@@ -56,6 +56,7 @@ pnpm dev
 | ---------------------- | ------------------------------------------------------ |
 | `pnpm dev`             | Runs the API with hot reload.                          |
 | `pnpm check`           | Runs typecheck, lint, format check, and tests.         |
+| `pnpm test:postgres`   | Runs lock-contention tests against local PostgreSQL.   |
 | `pnpm db:migrate`      | Runs pending Kysely migrations against `DATABASE_URL`. |
 | `pnpm db:migrate:down` | Rolls back the most recent Kysely migration.           |
 | `pnpm build`           | Builds the production TypeScript output.               |
@@ -80,6 +81,18 @@ flow complicated.
 `useTestDatabase()` in `src/lib/testing.ts` runs real migrations against an
 embedded PGlite database per test file. Tests exercise real SQL without a
 separate database, network connection, or Docker container.
+
+Wallet lock-contention evidence uses independent PostgreSQL sessions and is
+kept in a separate suite. Start the Compose database, then run:
+
+```bash
+docker compose up -d postgres
+pnpm test:postgres
+```
+
+The suite defaults to the Compose connection and creates a unique disposable
+schema. Set `POSTGRES_TEST_DATABASE_URL` to use another test-only PostgreSQL
+database. Never point this variable at production.
 
 ## Operations
 

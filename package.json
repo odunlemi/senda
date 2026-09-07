@@ -16,6 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "test:postgres": "vitest run --config vitest.postgres.config.ts",
     "test:watch": "vitest",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "db:migrate": "tsx src/lib/migrate.ts up",

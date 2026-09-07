@@ -1,4 +1,5 @@
-import { Kysely, PostgresDialect } from "kysely";
+import { Kysely, PostgresDialect, sql } from "kysely";
+import type { Transaction } from "kysely";
 import { Pool } from "pg";
 
 import { env } from "../config/env.js";
@@ -35,6 +36,20 @@ let instance: Kysely<Database> = new Kysely<Database>({
  */
 export function getDb(): Kysely<Database> {
   return instance;
+}
+
+/**
+ * Returns the database server's current wall time. Unlike PostgreSQL `now()`,
+ * `clock_timestamp()` advances during a transaction, so callers can sample
+ * the acceptance time after waiting for the locks that protect a transition.
+ */
+export async function getDatabaseTime(
+  executor: Kysely<Database> | Transaction<Database> = getDb(),
+): Promise<Date> {
+  const result = await sql<{ now: Date }>`select clock_timestamp() as now`.execute(executor);
+  const now = result.rows[0]?.now;
+  if (!now) throw new Error("Database did not return its current time");
+  return now;
 }
 
 /** Test-only: swaps the live instance. Named exports can't be reassigned

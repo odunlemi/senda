@@ -17,6 +17,14 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src", "services", "contracts", "migrations", "vitest.config.ts", "vitest.setup.ts"],
+  "include": [
+    "src",
+    "services",
+    "contracts",
+    "migrations",
+    "vitest.config.ts",
+    "vitest.postgres.config.ts",
+    "vitest.setup.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,6 +1,5 @@
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import { logger } from "../../src/lib/logger.js";
-import { sql } from "kysely";
 import { applyWalletChangeRequest } from "./merchants.service.js";
 
 const WORKER_INTERVAL_MS = 15_000;
@@ -8,14 +7,13 @@ const WORKER_INTERVAL_MS = 15_000;
 export async function processDueWalletChanges(
   apply: typeof applyWalletChangeRequest = applyWalletChangeRequest,
 ): Promise<void> {
-  const now = await sql<{ now: Date }>`select now()`.execute(getDb());
-  const nowDate = now.rows[0]?.now ?? new Date();
+  const now = await getDatabaseTime();
 
   const due = await getDb()
     .selectFrom("walletChangeRequests")
     .select("id")
     .where("status", "=", "pending")
-    .where("activationAt", "<=", nowDate)
+    .where("activationAt", "<=", now)
     .execute();
 
   for (const request of due) {
