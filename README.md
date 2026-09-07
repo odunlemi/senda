@@ -66,15 +66,17 @@ pnpm dev
 
 ```text
 created -> awaiting_payment -> confirming -> paid
-                       \\-> expired
-
-confirming -> failed
+created/awaiting_payment -> expired
+confirming -> failed | dropped
+dropped -> confirming | failed | paid
+paid -> paid (terminal)
 ```
 
-The backend must still record transaction hashes, provider event IDs,
-idempotency keys, confirmation counts, retries, and failure details. These
-fields support reliable reconciliation without making the customer-facing
-flow complicated.
+`dropped` means that the submitted hash has no available receipt after the
+five-minute confirmation timeout. It is unresolved, not failed: the worker
+keeps checking the original hash for 24 hours, and a later valid receipt can
+move it back to `confirming` or directly to `paid`. A paid intent remains
+terminal.
 
 ## Testing
 
@@ -115,6 +117,16 @@ Replacing an already-configured receiving wallet creates a pending change that
 becomes active after `MERCHANT_WALLET_CHANGE_DELAY_SECONDS` (default 86400).
 Payment links created during the delay continue to use the previous address,
 and the merchant can cancel the pending request until it is applied.
+
+For unresolved payments, monitor warning logs containing `unresolved payment
+monitoring escalated` and query `paymentIntents` rows where `status in
+('confirming', 'dropped')` and `monitoringEscalatedAt is not null`. Verify the
+stored `transactionHash` with the configured Base RPC and trigger the existing
+manual reconciliation endpoint if a receipt becomes available. Preserve the
+hash and payment row, and do not direct the customer to submit a second
+payment. Automated polling ends at the 24-hour `monitoringExpiresAt` deadline,
+even during an RPC outage, but manual reconciliation continues to accept a
+later valid receipt.
 
 ## Deploying
 

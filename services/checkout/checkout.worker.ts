@@ -25,16 +25,17 @@ function classifyReorg(
   return null;
 }
 
-export async function reconcileConfirmingPaymentIntents(): Promise<void> {
+export async function reconcileUnresolvedPaymentIntents(): Promise<void> {
   const intents = await getDb()
     .selectFrom("paymentIntents")
     .select("publicId")
-    .where("status", "=", "confirming")
+    .where("status", "in", ["confirming", "dropped"])
+    .where("monitoringEscalatedAt", "is", null)
     .execute();
 
   for (const intent of intents) {
     try {
-      await reconcileCheckout(intent.publicId);
+      await reconcileCheckout(intent.publicId, { automated: true });
     } catch (error) {
       logger.error({ err: error, publicId: intent.publicId }, "payment reconciliation failed");
     }
@@ -118,7 +119,7 @@ export function startCheckoutReconciliationWorker(): () => void {
     if (running) return;
     running = true;
     try {
-      await reconcileConfirmingPaymentIntents();
+      await reconcileUnresolvedPaymentIntents();
       await reconcilePaidPaymentIntents();
     } catch (error) {
       logger.error({ err: error }, "payment reconciliation cycle failed");

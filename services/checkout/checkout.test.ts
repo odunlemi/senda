@@ -4,14 +4,15 @@ import request from "supertest";
 import { beforeAll, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import { useTestDatabase } from "../../src/lib/testing.js";
 import { paymentConfig } from "../../src/config/payment.js";
 import { setBaseTransactionProvider } from "./checkout.provider.js";
 import {
-  reconcileConfirmingPaymentIntents,
   reconcilePaidPaymentIntents,
+  reconcileUnresolvedPaymentIntents,
 } from "./checkout.worker.js";
+import { reconcileCheckout } from "./checkout.service.js";
 
 useTestDatabase();
 
@@ -46,6 +47,29 @@ function usdcTransferLog(payer: string, destination: string, amountAtomic: strin
     ],
     data: `0x${BigInt(amountAtomic).toString(16).padStart(64, "0")}`,
   };
+}
+
+async function associatePaymentForTest(input: {
+  publicId: string;
+  transactionHash: string;
+  submittedAt: Date;
+  status?: "confirming" | "dropped";
+  monitoringExpiresAt?: Date;
+}): Promise<void> {
+  await getDb()
+    .updateTable("paymentIntents")
+    .set({
+      status: input.status ?? "confirming",
+      payerAddress,
+      transactionHash: input.transactionHash,
+      submittedAt: input.submittedAt,
+      monitoringExpiresAt:
+        input.monitoringExpiresAt ??
+        new Date(input.submittedAt.getTime() + paymentConfig.droppedMonitoringMs),
+      updatedAt: input.submittedAt,
+    })
+    .where("publicId", "=", input.publicId)
+    .execute();
 }
 
 beforeAll(async () => {
@@ -114,12 +138,20 @@ describe("guided checkout", () => {
       status: "confirming",
       payerAddress,
       transactionHash: transactionHash.toLowerCase(),
+      monitoringEscalatedAt: null,
     });
+    expect(body.data.paymentIntent.submittedAt).toEqual(expect.any(String));
+    expect(body.data.paymentIntent.monitoringExpiresAt).toEqual(expect.any(String));
+
+    const submittedAt = body.data.paymentIntent.submittedAt;
 
     const repeatedResponse = await request(app)
       .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
       .send({ transactionHash });
     expect(repeatedResponse.status).toBe(200);
+    expect((repeatedResponse.body as CheckoutBody).data.paymentIntent.submittedAt).toBe(
+      submittedAt,
+    );
   });
 
   it("normalizes a mixed-case hash and safely handles concurrent submissions", async () => {
@@ -178,6 +210,9 @@ describe("guided checkout", () => {
             payerAddress,
             transactionHash: hash,
             confirmationCount: paymentConfig.requiredConfirmations,
+            submittedAt: new Date(),
+            monitoringExpiresAt: new Date(Date.now() + paymentConfig.droppedMonitoringMs),
+            paidAt: new Date(),
             updatedAt: new Date(),
           })
           .where("publicId", "=", paymentIntent.publicId)
@@ -321,7 +356,7 @@ describe("guided checkout", () => {
     await request(app)
       .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
       .send({ transactionHash: hash });
-    await reconcileConfirmingPaymentIntents();
+    await reconcileUnresolvedPaymentIntents();
 
     const row = await getDb()
       .selectFrom("paymentIntents")
@@ -1264,15 +1299,12 @@ describe("confirming timeout", () => {
       getCurrentBlockNumber: () => Promise.resolve(0),
     });
 
-    await request(app)
-      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
-      .send({ transactionHash: hash });
-
     const timeoutAgo = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
-    await sql`
-      update "paymentIntents" set "updatedAt" = ${timeoutAgo}
-      where "publicId" = ${paymentIntent.publicId}
-    `.execute(getDb());
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt: timeoutAgo,
+    });
 
     const response = await request(app).post(
       `/api/payment-links/${paymentIntent.publicId}/confirm`,
@@ -1310,6 +1342,13 @@ describe("confirming timeout", () => {
       .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
       .send({ transactionHash: hash });
 
+    const misleadingUpdatedAt = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
+    await getDb()
+      .updateTable("paymentIntents")
+      .set({ updatedAt: misleadingUpdatedAt })
+      .where("publicId", "=", paymentIntent.publicId)
+      .execute();
+
     const response = await request(app).post(
       `/api/payment-links/${paymentIntent.publicId}/confirm`,
     );
@@ -1342,17 +1381,14 @@ describe("confirming timeout", () => {
       getCurrentBlockNumber: () => Promise.resolve(0),
     });
 
-    await request(app)
-      .post(`/api/payment-links/${paymentIntent.publicId}/transactions`)
-      .send({ transactionHash: hash });
-
     const timeoutAgo = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
-    await sql`
-      update "paymentIntents" set "updatedAt" = ${timeoutAgo}
-      where "publicId" = ${paymentIntent.publicId}
-    `.execute(getDb());
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt: timeoutAgo,
+    });
 
-    await reconcileConfirmingPaymentIntents();
+    await reconcileUnresolvedPaymentIntents();
 
     const row = await getDb()
       .selectFrom("paymentIntents")
@@ -1361,4 +1397,340 @@ describe("confirming timeout", () => {
       .executeTakeFirstOrThrow();
     expect(row.status).toBe("dropped");
   });
+
+  it("recovers a dropped payment when the receipt appears after a worker retry", async () => {
+    const hash = `0x${"6".repeat(64)}`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "6500000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    let receiptAvailable = false;
+    let receiptChecks = 0;
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "6500000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: (requestedHash) => {
+        if (requestedHash !== hash) return Promise.resolve(undefined);
+        receiptChecks += 1;
+        return Promise.resolve(
+          receiptAvailable
+            ? {
+                transactionHash: hash,
+                blockNumber: "0x50",
+                status: "0x1",
+                logs: [usdcTransferLog(payerAddress, destinationAddress, "6500000")],
+              }
+            : undefined,
+        );
+      },
+      getCurrentBlockNumber: () => Promise.resolve(0x5b),
+    });
+
+    const timeoutAgo = new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000);
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt: timeoutAgo,
+    });
+
+    await reconcileUnresolvedPaymentIntents();
+    let row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "transactionHash", "paidAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({ status: "dropped", transactionHash: hash, paidAt: null });
+
+    receiptAvailable = true;
+    await reconcileUnresolvedPaymentIntents();
+    row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "transactionHash", "paidAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("paid");
+    expect(row.transactionHash).toBe(hash);
+    expect(row.paidAt).not.toBeNull();
+
+    const acceptedAt = row.paidAt;
+    await reconcileUnresolvedPaymentIntents();
+    const unchanged = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["paidAt", "transactionHash"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(unchanged).toEqual({ paidAt: acceptedAt, transactionHash: hash });
+    expect(receiptChecks).toBe(2);
+
+    const receiptResponse = await request(app).get(
+      `/api/payment-links/${paymentIntent.publicId}/receipt`,
+    );
+    expect(receiptResponse.status).toBe(200);
+    expect(receiptResponse.body).toMatchObject({
+      success: true,
+      data: { receipt: { transactionHash: hash, settlement: "accepted" } },
+    });
+  });
+
+  it("lets manual reconciliation recover a payment after monitoring is escalated", async () => {
+    const hash = `0x${"5".repeat(63)}4`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "6600000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    let receiptAvailable = false;
+    setBaseTransactionProvider({
+      getTransaction: () =>
+        Promise.resolve({
+          hash,
+          from: payerAddress,
+          to: paymentConfig.assetContractAddress,
+          input: transferInput(destinationAddress, "6600000"),
+          value: "0x0",
+        }),
+      getTransactionReceipt: () =>
+        Promise.resolve(
+          receiptAvailable
+            ? {
+                transactionHash: hash,
+                blockNumber: "0x60",
+                status: "0x1",
+                logs: [usdcTransferLog(payerAddress, destinationAddress, "6600000")],
+              }
+            : undefined,
+        ),
+      getCurrentBlockNumber: () => Promise.resolve(0x6b),
+    });
+
+    const submittedAt = new Date(Date.now() - paymentConfig.droppedMonitoringMs - 1000);
+    const monitoringExpiresAt = new Date(Date.now() - 1000);
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt,
+      monitoringExpiresAt,
+      status: "dropped",
+    });
+
+    await reconcileUnresolvedPaymentIntents();
+    const escalated = await request(app).get(`/api/payment-links/${paymentIntent.publicId}`);
+    expect(escalated.status).toBe(200);
+    const escalatedPayment = (escalated.body as CheckoutBody).data.paymentIntent;
+    expect(escalatedPayment.status).toBe("dropped");
+    expect(typeof escalatedPayment.monitoringEscalatedAt).toBe("string");
+
+    receiptAvailable = true;
+    const recovered = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+    expect(recovered.status).toBe(200);
+    expect((recovered.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "paid",
+      transactionHash: hash,
+    });
+  });
+
+  it("bounds worker retries when the provider keeps failing", async () => {
+    const hash = `0x${"5".repeat(63)}a`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "6650000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    const submittedAt = await getDatabaseTime();
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt,
+      monitoringExpiresAt: new Date(submittedAt.getTime() + 100),
+      status: "dropped",
+    });
+
+    let receiptChecks = 0;
+    setBaseTransactionProvider({
+      getTransaction: () => Promise.resolve(undefined),
+      getTransactionReceipt: (requestedHash) => {
+        if (requestedHash === hash) receiptChecks += 1;
+        return Promise.reject(new Error("Base RPC unavailable"));
+      },
+      getCurrentBlockNumber: () => Promise.resolve(0),
+    });
+
+    await expect(reconcileCheckout(paymentIntent.publicId, { automated: true })).rejects.toThrow(
+      "Base RPC unavailable",
+    );
+    expect(receiptChecks).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await reconcileCheckout(paymentIntent.publicId, { automated: true });
+    expect(receiptChecks).toBe(1);
+
+    const row = await getDb()
+      .selectFrom("paymentIntents")
+      .select(["status", "monitoringEscalatedAt"])
+      .where("publicId", "=", paymentIntent.publicId)
+      .executeTakeFirstOrThrow();
+    expect(row.status).toBe("dropped");
+    expect(row.monitoringEscalatedAt).not.toBeNull();
+  });
+
+  it("stops every worker at the deadline without hiding manual recovery", async () => {
+    const hash = `0x${"5".repeat(63)}b`;
+    const paymentIntent = await createPaymentIntent({
+      merchantId: "checkout-merchant",
+      amountAtomic: "6660000",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+    const submittedAt = new Date(Date.now() - paymentConfig.droppedMonitoringMs - 1000);
+    await associatePaymentForTest({
+      publicId: paymentIntent.publicId,
+      transactionHash: hash,
+      submittedAt,
+      monitoringExpiresAt: new Date(Date.now() - 1000),
+      status: "dropped",
+    });
+
+    let receiptChecks = 0;
+    setBaseTransactionProvider({
+      getTransaction: () => Promise.resolve(undefined),
+      getTransactionReceipt: (requestedHash) => {
+        if (requestedHash === hash) receiptChecks += 1;
+        return Promise.resolve({
+          transactionHash: hash,
+          blockNumber: "0x80",
+          status: "0x1",
+          logs: [usdcTransferLog(payerAddress, destinationAddress, "6660000")],
+        });
+      },
+      getCurrentBlockNumber: () => Promise.resolve(0x80),
+    });
+
+    await Promise.all([reconcileUnresolvedPaymentIntents(), reconcileUnresolvedPaymentIntents()]);
+    expect(receiptChecks).toBe(0);
+
+    const recovered = await request(app).post(
+      `/api/payment-links/${paymentIntent.publicId}/confirm`,
+    );
+    expect(recovered.status).toBe(200);
+    expect((recovered.body as CheckoutBody).data.paymentIntent).toMatchObject({
+      status: "confirming",
+      confirmationCount: 1,
+    });
+    expect(receiptChecks).toBe(1);
+
+    await reconcileUnresolvedPaymentIntents();
+    expect(receiptChecks).toBe(1);
+  });
+
+  it.each([
+    ["timeout first", "d", "timeout"],
+    ["acceptance first", "e", "acceptance"],
+  ] as const)(
+    "keeps a payment paid when reconciliation races with %s",
+    async (_label, hashSuffix, firstWrite) => {
+      const hash = `0x${"5".repeat(63)}${hashSuffix}`;
+      const paymentIntent = await createPaymentIntent({
+        merchantId: "checkout-merchant",
+        amountAtomic: "6700000",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await request(app).post(`/api/payment-links/${paymentIntent.publicId}/checkout`);
+
+      let receiptCallCount = 0;
+      let releaseMissingReceipt!: (value: undefined) => void;
+      let releaseValidReceipt!: (value: {
+        transactionHash: string;
+        blockNumber: string;
+        status: string;
+        logs: ReturnType<typeof usdcTransferLog>[];
+      }) => void;
+      let notifyBothCalls!: () => void;
+      const bothCalls = new Promise<void>((resolve) => {
+        notifyBothCalls = resolve;
+      });
+      const missingReceipt = new Promise<undefined>((resolve) => {
+        releaseMissingReceipt = resolve;
+      });
+      const validReceipt = new Promise<{
+        transactionHash: string;
+        blockNumber: string;
+        status: string;
+        logs: ReturnType<typeof usdcTransferLog>[];
+      }>((resolve) => {
+        releaseValidReceipt = resolve;
+      });
+
+      setBaseTransactionProvider({
+        getTransaction: () =>
+          Promise.resolve({
+            hash,
+            from: payerAddress,
+            to: paymentConfig.assetContractAddress,
+            input: transferInput(destinationAddress, "6700000"),
+            value: "0x0",
+          }),
+        getTransactionReceipt: () => {
+          receiptCallCount += 1;
+          if (receiptCallCount === 2) notifyBothCalls();
+          return receiptCallCount === 1 ? missingReceipt : validReceipt;
+        },
+        getCurrentBlockNumber: () => Promise.resolve(0x7b),
+      });
+
+      await associatePaymentForTest({
+        publicId: paymentIntent.publicId,
+        transactionHash: hash,
+        submittedAt: new Date(Date.now() - paymentConfig.confirmingTimeoutMs - 1000),
+      });
+
+      const timeoutReconciliation = request(app)
+        .post(`/api/payment-links/${paymentIntent.publicId}/confirm`)
+        .then((response) => response);
+      const acceptanceReconciliation = request(app)
+        .post(`/api/payment-links/${paymentIntent.publicId}/confirm`)
+        .then((response) => response);
+      await bothCalls;
+      const acceptedReceipt = {
+        transactionHash: hash,
+        blockNumber: "0x70",
+        status: "0x1",
+        logs: [usdcTransferLog(payerAddress, destinationAddress, "6700000")],
+      };
+      if (firstWrite === "timeout") {
+        releaseMissingReceipt(undefined);
+        expect((await timeoutReconciliation).status).toBe(200);
+        releaseValidReceipt(acceptedReceipt);
+        expect((await acceptanceReconciliation).status).toBe(200);
+      } else {
+        releaseValidReceipt(acceptedReceipt);
+        expect((await acceptanceReconciliation).status).toBe(200);
+        releaseMissingReceipt(undefined);
+        expect((await timeoutReconciliation).status).toBe(200);
+      }
+
+      const row = await getDb()
+        .selectFrom("paymentIntents")
+        .select(["status", "transactionHash", "paidAt"])
+        .where("publicId", "=", paymentIntent.publicId)
+        .executeTakeFirstOrThrow();
+      expect(row.status).toBe("paid");
+      expect(row.transactionHash).toBe(hash);
+      expect(row.paidAt).not.toBeNull();
+    },
+  );
 });

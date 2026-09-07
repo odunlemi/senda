@@ -10,3 +10,8 @@ File naming: `<timestamp>_<description>.ts`, for example
 
 Run migrations with `pnpm db:migrate` and roll back the latest migration with
 `pnpm db:migrate:down`.
+
+The late-settlement monitoring migration gives pre-existing `confirming` and
+`dropped` hashes a fresh 24-hour monitoring window at deployment. Run the
+migration before deploying application code that writes `submittedAt` and
+`monitoringExpiresAt`.

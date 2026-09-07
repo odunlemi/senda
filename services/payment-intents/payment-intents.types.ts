@@ -27,6 +27,9 @@ export interface PaymentIntentsTable {
   transactionHash: string | null;
   confirmationCount: number;
   providerEventId: string | null;
+  submittedAt: Date | null;
+  monitoringExpiresAt: Date | null;
+  monitoringEscalatedAt: Date | null;
   paidAt: Date | null;
   reorgDetectedAt: Date | null;
   createdAt: Generated<Date>;

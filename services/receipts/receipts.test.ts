@@ -44,6 +44,7 @@ async function insertPaymentIntent(values: {
 }): Promise<void> {
   const merchantId = await createMerchant();
   const now = new Date();
+  const submittedAt = values.transactionHash ? now : null;
   await getDb()
     .insertInto("paymentIntents")
     .values({
@@ -62,6 +63,11 @@ async function insertPaymentIntent(values: {
       transactionHash: values.transactionHash ?? null,
       confirmationCount: values.confirmationCount ?? 0,
       providerEventId: null,
+      submittedAt,
+      monitoringExpiresAt: submittedAt
+        ? new Date(submittedAt.getTime() + paymentConfig.droppedMonitoringMs)
+        : null,
+      monitoringEscalatedAt: null,
       paidAt: values.paidAt ?? null,
       reorgDetectedAt: values.reorgDetectedAt ?? null,
       createdAt: now,

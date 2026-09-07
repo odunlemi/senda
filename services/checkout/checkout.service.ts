@@ -1,7 +1,8 @@
 import { paymentConfig } from "../../src/config/payment.js";
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import type { Updateable } from "kysely";
 import { badRequest, notFound } from "../../src/lib/errors.js";
+import { logger } from "../../src/lib/logger.js";
 import { toPublicPaymentIntent } from "../payment-intents/payment-intents.service.js";
 import { getBaseTransactionProvider, type BaseTransactionReceipt } from "./checkout.provider.js";
 import type {
@@ -158,13 +159,17 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
 
   let row: PaymentIntentRow | undefined;
   try {
+    const submittedAt = await getDatabaseTime();
+    const monitoringExpiresAt = new Date(submittedAt.getTime() + paymentConfig.droppedMonitoringMs);
     row = await getDb()
       .updateTable("paymentIntents")
       .set({
         status: "confirming",
         payerAddress: transaction.from.toLowerCase(),
         transactionHash: normalizedHash,
-        updatedAt: new Date(),
+        submittedAt,
+        monitoringExpiresAt,
+        updatedAt: submittedAt,
       })
       .where("id", "=", paymentIntent.id)
       .where("status", "=", "awaiting_payment")
@@ -181,7 +186,7 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
     const current = await requirePaymentIntent(publicId);
     if (
       current.transactionHash === normalizedHash &&
-      (current.status === "confirming" || current.status === "paid")
+      (current.status === "confirming" || current.status === "paid" || current.status === "dropped")
     ) {
       return toPublicPaymentIntent(current);
     }
@@ -191,27 +196,63 @@ export async function submitCheckoutTransaction(publicId: string, transactionHas
   return toPublicPaymentIntent(row);
 }
 
-export async function reconcileCheckout(publicId: string) {
-  const paymentIntent = await requirePaymentIntent(publicId);
-  if (
-    paymentIntent.status === "paid" ||
-    paymentIntent.status === "failed" ||
-    paymentIntent.status === "dropped"
-  ) {
+export async function reconcileCheckout(publicId: string, options: { automated?: boolean } = {}) {
+  let paymentIntent = await requirePaymentIntent(publicId);
+  if (paymentIntent.status === "paid" || paymentIntent.status === "failed") {
     return toPublicPaymentIntent(paymentIntent);
   }
-  if (paymentIntent.status !== "confirming" || !paymentIntent.transactionHash) {
+  if (
+    (paymentIntent.status !== "confirming" && paymentIntent.status !== "dropped") ||
+    !paymentIntent.transactionHash ||
+    !paymentIntent.submittedAt ||
+    !paymentIntent.monitoringExpiresAt
+  ) {
     badRequest("Payment link is not awaiting confirmation");
+  }
+  const transactionHash = paymentIntent.transactionHash;
+  const submittedAt = paymentIntent.submittedAt;
+  const monitoringExpiresAt = paymentIntent.monitoringExpiresAt;
+
+  const reconciliationStartedAt = await getDatabaseTime();
+  if (
+    paymentIntent.monitoringEscalatedAt === null &&
+    reconciliationStartedAt.getTime() >= monitoringExpiresAt.getTime()
+  ) {
+    const row = await getDb()
+      .updateTable("paymentIntents")
+      .set({
+        monitoringEscalatedAt: reconciliationStartedAt,
+        updatedAt: reconciliationStartedAt,
+      })
+      .where("id", "=", paymentIntent.id)
+      .where("status", "in", ["confirming", "dropped"])
+      .where("monitoringEscalatedAt", "is", null)
+      .returningAll()
+      .executeTakeFirst();
+    if (row) {
+      logger.warn({ publicId, transactionHash }, "unresolved payment monitoring escalated");
+    }
+    paymentIntent = row ?? (await requirePaymentIntent(publicId));
+    if (paymentIntent.status === "paid" || paymentIntent.status === "failed") {
+      return toPublicPaymentIntent(paymentIntent);
+    }
+  }
+
+  if (options.automated && paymentIntent.monitoringEscalatedAt !== null) {
+    return toPublicPaymentIntent(paymentIntent);
   }
 
   const provider = getBaseTransactionProvider();
-  const receipt = await provider.getTransactionReceipt(paymentIntent.transactionHash);
+  const receipt = await provider.getTransactionReceipt(transactionHash);
   if (!receipt?.blockNumber) {
-    const elapsedMs = Date.now() - paymentIntent.updatedAt.getTime();
-    if (elapsedMs > paymentConfig.confirmingTimeoutMs) {
+    const now = await getDatabaseTime();
+    if (
+      paymentIntent.status === "confirming" &&
+      now.getTime() - submittedAt.getTime() >= paymentConfig.confirmingTimeoutMs
+    ) {
       const row = await getDb()
         .updateTable("paymentIntents")
-        .set({ status: "dropped", updatedAt: new Date() })
+        .set({ status: "dropped", updatedAt: now })
         .where("id", "=", paymentIntent.id)
         .where("status", "=", "confirming")
         .returningAll()
@@ -220,7 +261,7 @@ export async function reconcileCheckout(publicId: string) {
     }
     return toPublicPaymentIntent(paymentIntent);
   }
-  if (receipt.transactionHash.toLowerCase() !== paymentIntent.transactionHash) {
+  if (receipt.transactionHash.toLowerCase() !== transactionHash) {
     throw new Error("Base RPC returned a receipt for the wrong transaction");
   }
 
@@ -238,20 +279,21 @@ export async function reconcileCheckout(publicId: string) {
     nextStatus = "confirming";
   }
 
+  const reconciledAt = await getDatabaseTime();
   const values: Updateable<PaymentIntentsTable> = {
     status: nextStatus,
     confirmationCount,
-    updatedAt: new Date(),
+    updatedAt: reconciledAt,
   };
   if (nextStatus === "paid") {
-    values.paidAt = new Date();
+    values.paidAt = reconciledAt;
   }
 
   const row = await getDb()
     .updateTable("paymentIntents")
     .set(values)
     .where("id", "=", paymentIntent.id)
-    .where("status", "=", "confirming")
+    .where("status", "in", ["confirming", "dropped"])
     .returningAll()
     .executeTakeFirst();
 

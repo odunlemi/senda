@@ -32,6 +32,9 @@ export const publicPaymentIntentSchema = z.object({
   payerAddress: z.string().nullable(),
   transactionHash: z.string().nullable(),
   confirmationCount: z.number().int().nonnegative(),
+  submittedAt: z.iso.datetime().nullable(),
+  monitoringExpiresAt: z.iso.datetime().nullable(),
+  monitoringEscalatedAt: z.iso.datetime().nullable(),
 });
 
 export const publicPaymentIntentResponseSchema = z.object({

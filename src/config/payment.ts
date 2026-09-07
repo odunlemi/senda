@@ -14,6 +14,10 @@ export const paymentConfig = {
   // before it is explicitly marked as dropped. This is an operational timeout,
   // not a technical Base requirement.
   confirmingTimeoutMs: 5 * 60 * 1000,
+  // Continue checking an unresolved submitted transaction for one day after
+  // submission. After this deadline, automated checks stop and operators must
+  // review the original hash; a later manual reconciliation can still settle it.
+  droppedMonitoringMs: 24 * 60 * 60 * 1000,
   // Operational finality: `paid` intents are terminal for the MVP. Reorg
   // detection is recorded for audit but does not reverse the payment.
   paidIsTerminal: true,

@@ -7,6 +7,10 @@ import { up as normalizeTransactionHashes } from "../../migrations/2026082502000
 import { up as backfillPaidAt } from "../../migrations/20260828030000_backfill_paid_at.js";
 import { up as normalizeReceivingWalletAddresses } from "../../migrations/20260830020000_normalize_receiving_wallet_addresses.js";
 import { up as addWalletChangeRequests } from "../../migrations/20260831010000_add_wallet_change_requests.js";
+import {
+  down as removeLateSettlementMonitoring,
+  up as addLateSettlementMonitoring,
+} from "../../migrations/20260907010000_add_late_settlement_monitoring.js";
 
 describe("payment-intent merchant ownership migration", () => {
   let pglite: PGlite;
@@ -139,6 +143,166 @@ describe("paidAt backfill migration", () => {
       select "paidAt", "updatedAt" from "paymentIntents" where "id" = 'paid-1'
     `.execute(db);
     expect(result.rows[0]?.paidAt).toEqual(result.rows[0]?.updatedAt);
+  });
+});
+
+describe("late-settlement monitoring migration", () => {
+  let pglite: PGlite;
+  let db: Kysely<unknown>;
+
+  beforeAll(async () => {
+    pglite = new PGlite();
+    db = new Kysely({ dialect: new PGliteDialect({ pglite }) });
+
+    await sql`
+      create table "paymentIntents" (
+        "id" text not null primary key,
+        "status" text not null,
+        "transactionHash" text,
+        "paidAt" timestamptz,
+        "createdAt" timestamptz not null,
+        "updatedAt" timestamptz not null
+      )
+    `.execute(db);
+    await sql`
+      insert into "paymentIntents" (
+        "id", "status", "transactionHash", "paidAt", "createdAt", "updatedAt"
+      )
+      values
+        (
+          'dropped-1', 'dropped', ${`0x${"a".repeat(64)}`}, null,
+          '2026-08-01T00:00:00.000Z', '2026-08-01T00:05:00.000Z'
+        ),
+        (
+          'created-1', 'created', null, null,
+          '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'
+        )
+    `.execute(db);
+
+    await addLateSettlementMonitoring(db);
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  it("backfills linked payments and grants unresolved hashes a fresh monitoring window", async () => {
+    const linked = await sql<{
+      submittedAt: Date;
+      monitoringExpiresAt: Date;
+      monitoringEscalatedAt: Date | null;
+    }>`
+      select "submittedAt", "monitoringExpiresAt", "monitoringEscalatedAt"
+      from "paymentIntents" where "id" = 'dropped-1'
+    `.execute(db);
+    const unlinked = await sql<{ submittedAt: Date | null }>`
+      select "submittedAt" from "paymentIntents" where "id" = 'created-1'
+    `.execute(db);
+
+    expect(linked.rows[0]?.submittedAt).toEqual(new Date("2026-08-01T00:05:00.000Z"));
+    expect(linked.rows[0]?.monitoringExpiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(linked.rows[0]?.monitoringEscalatedAt).toBeNull();
+    expect(unlinked.rows[0]?.submittedAt).toBeNull();
+  });
+
+  it("requires one valid monitoring timeline for every associated hash", async () => {
+    await expect(
+      sql`
+        insert into "paymentIntents" (
+          "id", "status", "transactionHash", "paidAt", "createdAt", "updatedAt"
+        )
+        values (
+          'invalid-1', 'confirming', ${`0x${"b".repeat(64)}`}, null,
+          clock_timestamp(), clock_timestamp()
+        )
+      `.execute(db),
+    ).rejects.toThrow();
+
+    await expect(
+      sql`
+        update "paymentIntents"
+        set "monitoringEscalatedAt" = "monitoringExpiresAt" - interval '1 second'
+        where "id" = 'dropped-1'
+      `.execute(db),
+    ).rejects.toThrow();
+  });
+
+  it("keeps submission and monitoring deadline timestamps immutable", async () => {
+    await expect(
+      sql`
+        update "paymentIntents"
+        set "submittedAt" = "submittedAt" + interval '1 second'
+        where "id" = 'dropped-1'
+      `.execute(db),
+    ).rejects.toThrow(/submission time is immutable/);
+
+    await expect(
+      sql`
+        update "paymentIntents"
+        set "monitoringExpiresAt" = "monitoringExpiresAt" + interval '1 second'
+        where "id" = 'dropped-1'
+      `.execute(db),
+    ).rejects.toThrow(/monitoring deadline is immutable/);
+  });
+
+  it("indexes unresolved dropped monitoring work by deadline", async () => {
+    const result = await sql<{ indexname: string; indexdef: string }>`
+      select "indexname", "indexdef" from pg_indexes
+      where "tablename" = 'paymentIntents'
+    `.execute(db);
+    const index = result.rows.find(
+      (row) => row.indexname === "paymentIntents_unresolved_monitoring_idx",
+    );
+    expect(index?.indexdef).toContain("monitoringExpiresAt");
+    expect(index?.indexdef).toContain("monitoringEscalatedAt");
+    expect(index?.indexdef).toContain("confirming");
+    expect(index?.indexdef).toContain("dropped");
+  });
+
+  it("rolls back monitoring metadata without discarding payment rows", async () => {
+    const rollbackPglite = new PGlite();
+    const rollbackDb = new Kysely<unknown>({
+      dialect: new PGliteDialect({ pglite: rollbackPglite }),
+    });
+    try {
+      await sql`
+        create table "paymentIntents" (
+          "id" text not null primary key,
+          "status" text not null,
+          "transactionHash" text,
+          "paidAt" timestamptz,
+          "createdAt" timestamptz not null,
+          "updatedAt" timestamptz not null
+        )
+      `.execute(rollbackDb);
+      await sql`
+        insert into "paymentIntents" (
+          "id", "status", "transactionHash", "paidAt", "createdAt", "updatedAt"
+        )
+        values (
+          'rollback-1', 'dropped', ${`0x${"c".repeat(64)}`}, null,
+          clock_timestamp(), clock_timestamp()
+        )
+      `.execute(rollbackDb);
+
+      await addLateSettlementMonitoring(rollbackDb);
+      await removeLateSettlementMonitoring(rollbackDb);
+
+      const rows = await sql<{ id: string; status: string; transactionHash: string }>`
+        select "id", "status", "transactionHash" from "paymentIntents"
+      `.execute(rollbackDb);
+      const monitoringColumns = await sql<{ column_name: string }>`
+        select column_name from information_schema.columns
+        where table_name = 'paymentIntents'
+          and column_name in ('submittedAt', 'monitoringExpiresAt', 'monitoringEscalatedAt')
+      `.execute(rollbackDb);
+      expect(rows.rows).toEqual([
+        { id: "rollback-1", status: "dropped", transactionHash: `0x${"c".repeat(64)}` },
+      ]);
+      expect(monitoringColumns.rows).toEqual([]);
+    } finally {
+      await rollbackDb.destroy();
+    }
   });
 });
 

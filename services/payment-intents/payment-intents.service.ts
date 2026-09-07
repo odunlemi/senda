@@ -34,6 +34,9 @@ export function toPublicPaymentIntent(row: PaymentIntentRow) {
     payerAddress: row.payerAddress,
     transactionHash: row.transactionHash,
     confirmationCount: row.confirmationCount,
+    submittedAt: row.submittedAt?.toISOString() ?? null,
+    monitoringExpiresAt: row.monitoringExpiresAt?.toISOString() ?? null,
+    monitoringEscalatedAt: row.monitoringEscalatedAt?.toISOString() ?? null,
   };
 }
 
