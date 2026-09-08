@@ -669,8 +669,21 @@ describe("delayed wallet replacement", () => {
       ])
       .orderBy("id")
       .execute();
+    const alerts = await getDb()
+      .selectFrom("operationalAlertDeliveries as delivery")
+      .innerJoin("auditEvents as audit", "audit.id", "delivery.auditEventId")
+      .select([
+        "delivery.id",
+        "delivery.auditEventId",
+        "delivery.eventKind",
+        "delivery.status",
+        "delivery.payload",
+      ])
+      .where("audit.merchantId", "=", merchantId)
+      .orderBy("delivery.id")
+      .execute();
 
-    return { merchant, requests, audits };
+    return { merchant, requests, audits, alerts };
   }
 
   it("returns 202 with a pending address and activation timestamp", async () => {

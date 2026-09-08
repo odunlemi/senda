@@ -47,3 +47,22 @@ where "eventType" in (
 )
 limit 1;
 ```
+
+## Operational alert cutover and rollback
+
+Migration `20260908010000_add_operational_alert_outbox.ts` creates an empty
+outbox. Its application time is the explicit delivery cutover; pre-existing
+audit events are not copied or silently sent. Deploy this migration before code
+that records operational alert deliveries.
+
+Pause API and worker writes across this migration and the new application
+release. Railway predeploy migrations run while the old release may still be
+serving; without a maintenance window, a tracked audit event committed by that
+old code after migration would have no outbox row and will not be reconstructed.
+
+Once the outbox contains any row, its `down` migration refuses to drop the
+table. Retain the forward schema and migration file in application rollback
+releases so audit-to-delivery identity, retry state, and delivery history remain
+intact. Stop alert producers and dispatchers, take a database backup, and use a
+forward repair for schema corrections. Only an empty, never-used outbox may be
+rolled back directly.

@@ -14,6 +14,7 @@ const migrationFolder = path.join(
   "migrations",
 );
 const boundaryMigrationName = "20260907020000_guard_wallet_change_rollback";
+const alertMigrationName = "20260908010000_add_operational_alert_outbox";
 const walletEventTypes = [
   "merchant.receiving_wallet_change_requested",
   "merchant.receiving_wallet_change_cancelled",
@@ -34,6 +35,15 @@ async function createMigratedDatabase(): Promise<{
   if (error) {
     await db.destroy();
     throw new Error("Rollback-boundary test migration failed", { cause: error });
+  }
+  const alertRollback = await migrator.migrateDown();
+  if (alertRollback.error) {
+    await db.destroy();
+    throw new Error("Alert migration rollback failed", { cause: alertRollback.error });
+  }
+  if (alertRollback.results?.[0]?.migrationName !== alertMigrationName) {
+    await db.destroy();
+    throw new Error("Expected alert migration rollback before the wallet boundary test");
   }
   await sql`
     insert into "user" ("id", "name", "email")

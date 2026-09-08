@@ -133,6 +133,108 @@ payment. Automated polling ends at the 24-hour `monitoringExpiresAt` deadline,
 even during an RPC outage, but manual reconciliation continues to accept a
 later valid receipt.
 
+### Operational alerts
+
+Security-sensitive wallet replacement transitions and paid-payment reorg
+detections enqueue an operator alert in the same transaction as their domain
+change and audit event. The migration is the cutover: existing audit events are
+not backfilled. Initial wallet setup and the compatibility
+`merchant.receiving_wallet_changed` event do not enqueue an alert.
+
+Make that cutover coordinated: pause API and worker writes, apply the migration,
+deploy the alert-producing application, then resume writes. Railway runs the
+migration before replacing the old application. If old code is allowed to
+commit one of these audit events after the migration, it has no outbox row and
+is intentionally not reconstructed later.
+
+`OPERATIONAL_ALERTS_MODE=disabled` leaves delivery off while continuing to
+build the durable backlog. This is suitable for development or a controlled
+maintenance window, but it is not an operationally complete production mode.
+Setting the mode to `webhook` without both `OPERATIONAL_ALERT_WEBHOOK_URL` and
+`OPERATIONAL_ALERT_WEBHOOK_TOKEN` fails environment validation at startup. For
+production, configure all three as server-only Railway variables. The URL must
+use HTTPS, name an operator-controlled receiver, and never come from merchant
+or public request input. Redirects are not followed.
+
+The dispatcher sends an authenticated `POST` with these headers:
+
+```text
+Authorization: Bearer <OPERATIONAL_ALERT_WEBHOOK_TOKEN>
+Content-Type: application/json
+Idempotency-Key: <stable delivery UUID>
+X-Senda-Event: <event kind>
+```
+
+The strict version 1 JSON body contains the same delivery UUID, event time,
+event kind, and allowlisted subject identifiers. Wallet alerts contain merchant
+and wallet-change-request IDs plus cancellation actor and safe reason when
+applicable. Reorg alerts contain merchant, internal payment-intent, public
+payment, and reason identifiers. Wallet addresses, transaction hashes,
+credentials, cookies, raw provider responses, and arbitrary audit metadata are
+not delivered.
+
+Delivery is at least once, not exactly once. A process can crash after the
+receiver accepts a request but before Senda records success. The expired lease
+is then reclaimed and the same `Idempotency-Key` is sent again; the receiver
+must deduplicate on that value. Requests have a finite timeout. Network errors,
+timeouts, HTTP 408, 425, 429, and 5xx responses retry with capped exponential
+backoff. Other 4xx responses become `failed`; retryable responses become
+`exhausted` after `OPERATIONAL_ALERT_MAX_ATTEMPTS` recorded failures.
+If that limit is reduced, pending rows already at the new ceiling move to
+`exhausted` in bounded worker batches instead of remaining ineligible forever.
+
+Use service logs containing `operational alert worker started` and
+`operational alert worker cycle completed`, together with Railway process
+monitoring, to check worker availability independently of the webhook itself.
+Inspect backlog age and delivery state with:
+
+```sql
+select "status", count(*) as deliveries,
+       min("createdAt") as oldest_created_at,
+       clock_timestamp() - min("createdAt") as oldest_age,
+       min("nextAttemptAt") as next_due_at,
+       min("leasedUntil") as earliest_lease_expiry,
+       min("failedAt") as earliest_terminal_at
+from "operationalAlertDeliveries"
+group by "status"
+order by "status";
+
+select "id", "eventKind", "status", "attemptCount", "nextAttemptAt",
+       "leasedUntil", "lastErrorCode", "lastHttpStatus", "updatedAt"
+from "operationalAlertDeliveries"
+where "status" in ('pending', 'processing', 'failed', 'exhausted')
+order by "createdAt"
+limit 100;
+```
+
+Before replaying a `failed` or `exhausted` row, fix and verify the destination,
+record the delivery ID, and reset only that row. Preserve its original ID and
+payload so receiver deduplication remains effective:
+
+```sql
+begin;
+select "id", "eventKind", "payload" from "operationalAlertDeliveries"
+where "id" = '<delivery UUID>' for update;
+update "operationalAlertDeliveries"
+set "status" = 'pending', "attemptCount" = 0,
+    "nextAttemptAt" = clock_timestamp(),
+    "leaseToken" = null, "leasedUntil" = null, "deliveredAt" = null,
+    "lastAttemptAt" = null, "failedAt" = null, "lastErrorCode" = null,
+    "lastHttpStatus" = null,
+    "updatedAt" = clock_timestamp()
+where "id" = '<delivery UUID>' and "status" in ('failed', 'exhausted');
+commit;
+```
+
+Resetting the attempt counter starts a new bounded delivery cycle while the
+original delivery ID and payload remain unchanged. The status filter prevents
+replay from taking an active lease away from a worker.
+
+For a controlled delivery smoke test, point the staging variables at a test
+receiver that returns 2xx, initiate one test wallet replacement, and verify the
+bearer header, stable idempotency key, strict payload, and final `delivered`
+row. Never use a real paging or merchant endpoint from automated tests.
+
 ## Deploying
 
 `railway.json` configures the build, migrations, start command, and health

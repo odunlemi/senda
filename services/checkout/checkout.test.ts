@@ -942,6 +942,23 @@ describe("reorg monitoring", () => {
       transactionHash: hash,
       reason: "missing_transaction_and_receipt",
     });
+    const delivery = await getDb()
+      .selectFrom("operationalAlertDeliveries")
+      .selectAll()
+      .where("auditEventId", "=", event.id)
+      .executeTakeFirstOrThrow();
+    expect(delivery.payload).toEqual({
+      version: 1,
+      deliveryId: delivery.id,
+      eventTime: event.createdAt.toISOString(),
+      eventKind: "payment.reorg_detected",
+      subject: {
+        merchantId: "checkout-merchant",
+        paymentIntentId: paymentIntent.id,
+        paymentPublicId: paymentIntent.publicId,
+        reason: "missing_transaction_and_receipt",
+      },
+    });
   });
 
   it("writes a changed receipt identity audit event", async () => {
@@ -1195,6 +1212,18 @@ describe("reorg audit concurrency", () => {
       .executeTakeFirstOrThrow();
 
     expect(Number(events.count)).toBe(1);
+    const deliveries = await getDb()
+      .selectFrom("operationalAlertDeliveries")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("eventKind", "=", "payment.reorg_detected")
+      .where("auditEventId", "in", (query) =>
+        query
+          .selectFrom("auditEvents")
+          .select("id")
+          .where("paymentIntentId", "=", paymentIntent.id),
+      )
+      .executeTakeFirstOrThrow();
+    expect(Number(deliveries.count)).toBe(1);
   });
 
   it("rolls back the reorg update when the audit event insertion fails", async () => {
@@ -1273,6 +1302,18 @@ describe("reorg audit concurrency", () => {
       .executeTakeFirstOrThrow();
 
     expect(Number(events.count)).toBe(1);
+    const deliveries = await getDb()
+      .selectFrom("operationalAlertDeliveries")
+      .select(({ fn }) => [fn.count("id").as("count")])
+      .where("eventKind", "=", "payment.reorg_detected")
+      .where("auditEventId", "in", (query) =>
+        query
+          .selectFrom("auditEvents")
+          .select("id")
+          .where("paymentIntentId", "=", paymentIntent.id),
+      )
+      .executeTakeFirstOrThrow();
+    expect(Number(deliveries.count)).toBe(0);
   });
 });
 

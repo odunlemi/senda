@@ -6,7 +6,7 @@ import { ConflictError, conflict, notFound } from "../../src/lib/errors.js";
 import { sql } from "kysely";
 import type { Transaction } from "kysely";
 import type { Database } from "../../src/lib/db.js";
-import type { AuditEventType } from "../audit/audit-events.types.js";
+import { recordAuditEvent } from "../audit/audit-events.service.js";
 import type { WalletChangeRequestRow } from "./merchants.types.js";
 
 function canonicalizeEvmAddress(address: string): string {
@@ -27,31 +27,6 @@ async function acquireAddressLock(trx: Transaction<Database>, address: string): 
   await sql`
     select pg_advisory_xact_lock(('x' || substr(md5(${address}), 1, 16))::bit(64)::bigint)
   `.execute(trx);
-}
-
-async function insertAuditEvent(
-  trx: Transaction<Database>,
-  values: {
-    eventType: AuditEventType;
-    actorType: "merchant" | "system";
-    actorId: string | null;
-    merchantId: string;
-    paymentIntentId: string | null;
-    metadata: Record<string, unknown>;
-  },
-): Promise<void> {
-  await trx
-    .insertInto("auditEvents")
-    .values({
-      id: crypto.randomUUID(),
-      eventType: values.eventType,
-      actorType: values.actorType,
-      actorId: values.actorId,
-      merchantId: values.merchantId,
-      paymentIntentId: values.paymentIntentId,
-      metadata: values.metadata,
-    })
-    .execute();
 }
 
 function addressEqualsColumn(column: string, address: string) {
@@ -127,7 +102,7 @@ export async function setOrRequestMerchantWallet(
           .where("id", "=", merchantId)
           .executeTakeFirstOrThrow();
 
-        await insertAuditEvent(trx, {
+        await recordAuditEvent(trx, {
           eventType: "merchant.receiving_wallet_changed",
           actorType: "merchant",
           actorId: merchantId,
@@ -137,6 +112,7 @@ export async function setOrRequestMerchantWallet(
             previousWalletAddress: merchant.receivingWalletAddress,
             newWalletAddress: canonicalAddress,
           },
+          createdAt: now,
         });
 
         return { kind: "immediate", address: canonicalAddress };
@@ -179,7 +155,7 @@ export async function setOrRequestMerchantWallet(
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await insertAuditEvent(trx, {
+      await recordAuditEvent(trx, {
         eventType: "merchant.receiving_wallet_change_requested",
         actorType: "merchant",
         actorId: merchantId,
@@ -189,6 +165,12 @@ export async function setOrRequestMerchantWallet(
           previousWalletAddress: merchant.receivingWalletAddress,
           requestedWalletAddress: canonicalAddress,
           activationAt,
+        },
+        createdAt: now,
+        operationalAlert: {
+          eventKind: "merchant.receiving_wallet_change_requested",
+          merchantId,
+          walletChangeRequestId: request.id,
         },
       });
 
@@ -241,7 +223,7 @@ export async function cancelPendingWalletChange(
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await insertAuditEvent(trx, {
+      await recordAuditEvent(trx, {
         eventType: "merchant.receiving_wallet_change_cancelled",
         actorType: "merchant",
         actorId: merchantId,
@@ -250,6 +232,13 @@ export async function cancelPendingWalletChange(
         metadata: {
           previousWalletAddress: request.previousAddress,
           requestedWalletAddress: request.requestedAddress,
+        },
+        createdAt: now,
+        operationalAlert: {
+          eventKind: "merchant.receiving_wallet_change_cancelled",
+          merchantId,
+          walletChangeRequestId: request.id,
+          cancelledBy: "merchant",
         },
       });
 
@@ -326,7 +315,7 @@ export async function applyWalletChangeRequest(
           .returningAll()
           .executeTakeFirstOrThrow();
 
-        await insertAuditEvent(trx, {
+        await recordAuditEvent(trx, {
           eventType: "merchant.receiving_wallet_change_cancelled",
           actorType: "system",
           actorId: null,
@@ -335,6 +324,14 @@ export async function applyWalletChangeRequest(
           metadata: {
             previousWalletAddress: request.previousAddress,
             requestedWalletAddress: request.requestedAddress,
+            reason: "previous_address_changed_before_activation",
+          },
+          createdAt: now,
+          operationalAlert: {
+            eventKind: "merchant.receiving_wallet_change_cancelled",
+            merchantId: request.merchantId,
+            walletChangeRequestId: request.id,
+            cancelledBy: "system",
             reason: "previous_address_changed_before_activation",
           },
         });
@@ -361,7 +358,7 @@ export async function applyWalletChangeRequest(
           .returningAll()
           .executeTakeFirstOrThrow();
 
-        await insertAuditEvent(trx, {
+        await recordAuditEvent(trx, {
           eventType: "merchant.receiving_wallet_change_cancelled",
           actorType: "system",
           actorId: null,
@@ -370,6 +367,14 @@ export async function applyWalletChangeRequest(
           metadata: {
             previousWalletAddress: request.previousAddress,
             requestedWalletAddress: request.requestedAddress,
+            reason: "requested_address_unavailable_before_activation",
+          },
+          createdAt: now,
+          operationalAlert: {
+            eventKind: "merchant.receiving_wallet_change_cancelled",
+            merchantId: request.merchantId,
+            walletChangeRequestId: request.id,
+            cancelledBy: "system",
             reason: "requested_address_unavailable_before_activation",
           },
         });
@@ -395,7 +400,7 @@ export async function applyWalletChangeRequest(
         .returningAll()
         .executeTakeFirstOrThrow();
 
-      await insertAuditEvent(trx, {
+      await recordAuditEvent(trx, {
         eventType: "merchant.receiving_wallet_change_applied",
         actorType: "system",
         actorId: null,
@@ -406,9 +411,15 @@ export async function applyWalletChangeRequest(
           newWalletAddress: request.requestedAddress,
           activationAt: request.activationAt,
         },
+        createdAt: now,
+        operationalAlert: {
+          eventKind: "merchant.receiving_wallet_change_applied",
+          merchantId: request.merchantId,
+          walletChangeRequestId: request.id,
+        },
       });
 
-      await insertAuditEvent(trx, {
+      await recordAuditEvent(trx, {
         eventType: "merchant.receiving_wallet_changed",
         actorType: "system",
         actorId: null,
@@ -418,6 +429,7 @@ export async function applyWalletChangeRequest(
           previousWalletAddress: request.previousAddress,
           newWalletAddress: request.requestedAddress,
         },
+        createdAt: now,
       });
 
       return { kind: "applied", request: applied };

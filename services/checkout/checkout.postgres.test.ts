@@ -83,6 +83,7 @@ beforeAll(async () => {
   const migrator = new Migrator({
     db: database,
     provider: new FileMigrationProvider({ fs, path, migrationFolder }),
+    migrationTableSchema: schema,
   });
   const { error } = await migrator.migrateToLatest();
   if (error) throw new Error("Checkout PostgreSQL proof migrations failed", { cause: error });

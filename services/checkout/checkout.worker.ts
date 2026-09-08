@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
-
 import type { PaymentReorgReason } from "../payment-intents/payment-intents.types.js";
 import { env } from "../../src/config/env.js";
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import { logger } from "../../src/lib/logger.js";
+import { recordAuditEvent } from "../audit/audit-events.service.js";
 import {
   getBaseTransactionProvider,
   type BaseTransaction,
@@ -74,9 +73,10 @@ export async function reconcilePaidPaymentIntents(): Promise<void> {
       const updated = await getDb()
         .transaction()
         .execute(async (trx) => {
+          const detectedAt = await getDatabaseTime(trx);
           const payment = await trx
             .updateTable("paymentIntents")
-            .set({ reorgDetectedAt: new Date() })
+            .set({ reorgDetectedAt: detectedAt })
             .where("publicId", "=", intent.publicId)
             .where("status", "=", "paid")
             .where("reorgDetectedAt", "is", null)
@@ -85,18 +85,22 @@ export async function reconcilePaidPaymentIntents(): Promise<void> {
 
           if (!payment) return null;
 
-          await trx
-            .insertInto("auditEvents")
-            .values({
-              id: randomUUID(),
-              eventType: "payment.reorg_detected",
-              actorType: "system",
-              actorId: null,
+          await recordAuditEvent(trx, {
+            eventType: "payment.reorg_detected",
+            actorType: "system",
+            actorId: null,
+            merchantId: intent.merchantId,
+            paymentIntentId: intent.id,
+            metadata: { transactionHash: intent.transactionHash, reason },
+            createdAt: detectedAt,
+            operationalAlert: {
+              eventKind: "payment.reorg_detected",
               merchantId: intent.merchantId,
               paymentIntentId: intent.id,
-              metadata: { transactionHash: intent.transactionHash, reason },
-            })
-            .execute();
+              paymentPublicId: intent.publicId,
+              reason,
+            },
+          });
 
           return payment;
         });

@@ -4,6 +4,7 @@ import { Pool } from "pg";
 
 import { env } from "../config/env.js";
 import type { AuditEventsTable } from "../../services/audit/audit-events.types.js";
+import type { OperationalAlertDeliveriesTable } from "../../services/alerts/operational-alerts.types.js";
 import type { PaymentIntentsTable } from "../../services/payment-intents/payment-intents.types.js";
 import type {
   MerchantsTable,
@@ -20,6 +21,7 @@ export interface Database {
   paymentIntents: PaymentIntentsTable;
   user: MerchantsTable;
   auditEvents: AuditEventsTable;
+  operationalAlertDeliveries: OperationalAlertDeliveriesTable;
   walletChangeRequests: WalletChangeRequestsTable;
 }
 

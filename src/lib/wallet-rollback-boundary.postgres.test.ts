@@ -21,6 +21,7 @@ const migrationFolder = path.join(
   "migrations",
 );
 const boundaryMigrationName = "20260907020000_guard_wallet_change_rollback";
+const alertMigrationName = "20260908010000_add_operational_alert_outbox";
 
 let adminPool: Pool;
 let migrationPool: Pool;
@@ -105,6 +106,7 @@ beforeAll(async () => {
   migrator = new Migrator({
     db: database,
     provider: new FileMigrationProvider({ fs, path, migrationFolder }),
+    migrationTableSchema: schema,
   });
   const { error } = await migrator.migrateToLatest();
   if (error) throw new Error("Rollback concurrency migrations failed", { cause: error });
@@ -114,6 +116,17 @@ beforeAll(async () => {
 beforeEach(async () => {
   const { error } = await migrator.migrateToLatest();
   if (error) throw new Error("Could not restore rollback boundary", { cause: error });
+  const alertRollback = await migrator.migrateDown();
+  if (alertRollback.error) {
+    throw new Error("Could not remove alert migration before boundary proof", {
+      cause: alertRollback.error,
+    });
+  }
+  expect(alertRollback.results?.[0]).toMatchObject({
+    migrationName: alertMigrationName,
+    direction: "Down",
+    status: "Success",
+  });
   await sql`delete from "auditEvents"`.execute(database);
   await sql`delete from "paymentIntents"`.execute(database);
   await sql`delete from "walletChangeRequests"`.execute(database);
