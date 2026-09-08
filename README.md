@@ -117,6 +117,11 @@ Replacing an already-configured receiving wallet creates a pending change that
 becomes active after `MERCHANT_WALLET_CHANGE_DELAY_SECONDS` (default 86400).
 Payment links created during the delay continue to use the previous address,
 and the merchant can cancel the pending request until it is applied.
+Payment-link creation and wallet activation are serialized by the merchant row:
+a link ordered before activation stores the old address, while one ordered
+after activation stores the new address. Existing links retain their stored
+destination regardless of later wallet changes; HTTP response order does not
+define this database ordering.
 
 For unresolved payments, monitor warning logs containing `unresolved payment
 monitoring escalated` and query `paymentIntents` rows where `status in

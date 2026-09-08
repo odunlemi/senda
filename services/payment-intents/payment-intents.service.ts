@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { paymentConfig } from "../../src/config/payment.js";
-import { getDb } from "../../src/lib/db.js";
+import { getDatabaseTime, getDb } from "../../src/lib/db.js";
 import { badRequest } from "../../src/lib/errors.js";
 import type { CreatePaymentIntentInput } from "./payment-intents.types.js";
 import type { PaymentIntentRow } from "./payment-intents.types.js";
@@ -12,8 +12,8 @@ function requirePositiveAtomicAmount(amountAtomic: string): void {
   }
 }
 
-function requireFutureExpiry(expiresAt: Date): void {
-  if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+function requireValidExpiry(expiresAt: Date): void {
+  if (Number.isNaN(expiresAt.getTime())) {
     badRequest("expiresAt must be a future date");
   }
 }
@@ -42,41 +42,51 @@ export function toPublicPaymentIntent(row: PaymentIntentRow) {
 
 export async function createPaymentIntent(input: CreatePaymentIntentInput) {
   requirePositiveAtomicAmount(input.amountAtomic);
-  requireFutureExpiry(input.expiresAt);
+  requireValidExpiry(input.expiresAt);
 
-  const merchant = await getDb()
-    .selectFrom("user")
-    .select("receivingWalletAddress")
-    .where("id", "=", input.merchantId)
-    .executeTakeFirst();
-  if (!merchant?.receivingWalletAddress) {
-    badRequest("Merchant receiving wallet is not configured");
-  }
-
-  const now = new Date();
   const row = await getDb()
-    .insertInto("paymentIntents")
-    .values({
-      id: randomUUID(),
-      merchantId: input.merchantId,
-      publicId: randomUUID(),
-      amountAtomic: input.amountAtomic,
-      asset: paymentConfig.asset,
-      chain: paymentConfig.chain,
-      destinationAddress: merchant.receivingWalletAddress,
-      description: input.description ?? null,
-      reference: input.reference ?? null,
-      status: "created",
-      expiresAt: input.expiresAt,
-      payerAddress: null,
-      transactionHash: null,
-      confirmationCount: 0,
-      providerEventId: null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returningAll()
-    .executeTakeFirstOrThrow();
+    .transaction()
+    .execute(async (trx) => {
+      // Wallet activation also locks the merchant first. Holding this lock
+      // through the insert gives creation and activation one database order.
+      const merchant = await trx
+        .selectFrom("user")
+        .select("receivingWalletAddress")
+        .where("id", "=", input.merchantId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!merchant?.receivingWalletAddress) {
+        badRequest("Merchant receiving wallet is not configured");
+      }
+
+      const now = await getDatabaseTime(trx);
+      if (input.expiresAt.getTime() <= now.getTime()) {
+        badRequest("expiresAt must be a future date");
+      }
+      return await trx
+        .insertInto("paymentIntents")
+        .values({
+          id: randomUUID(),
+          merchantId: input.merchantId,
+          publicId: randomUUID(),
+          amountAtomic: input.amountAtomic,
+          asset: paymentConfig.asset,
+          chain: paymentConfig.chain,
+          destinationAddress: merchant.receivingWalletAddress,
+          description: input.description ?? null,
+          reference: input.reference ?? null,
+          status: "created",
+          expiresAt: input.expiresAt,
+          payerAddress: null,
+          transactionHash: null,
+          confirmationCount: 0,
+          providerEventId: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returningAll()
+        .executeTakeFirstOrThrow();
+    });
 
   return toPublicPaymentIntent(row);
 }

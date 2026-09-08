@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import { env } from "../../src/config/env.js";
 import { type Database, getDatabaseTime, setDb } from "../../src/lib/db.js";
-import { ConflictError, NotFoundError } from "../../src/lib/errors.js";
+import { BadRequestError, ConflictError, NotFoundError } from "../../src/lib/errors.js";
 import { logger } from "../../src/lib/logger.js";
 import {
   applyWalletChangeRequest,
@@ -20,6 +20,7 @@ import {
 } from "./merchants.service.js";
 import { isMerchantSessionFresh } from "./merchants.middleware.js";
 import { processDueWalletChanges } from "./merchants.worker.js";
+import { createPaymentIntent } from "../payment-intents/payment-intents.service.js";
 
 const connectionString =
   process.env.POSTGRES_TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/senda";
@@ -98,6 +99,17 @@ async function holdAddressLock(requestedAddress: string): Promise<{
     "select pg_advisory_xact_lock(('x' || substr(md5($1), 1, 16))::bit(64)::bigint)",
     [requestedAddress],
   );
+  return { pid: identity.rows[0]!.pid, client };
+}
+
+async function holdTableLock(table: "paymentIntents" | "auditEvents"): Promise<{
+  pid: number;
+  client: PoolClient;
+}> {
+  const client = await controlPool.connect();
+  await client.query("begin");
+  const identity = await client.query<{ pid: number }>("select pg_backend_pid() as pid");
+  await client.query(`lock table "${table}" in access exclusive mode`);
   return { pid: identity.rows[0]!.pid, client };
 }
 
@@ -227,6 +239,131 @@ afterAll(async () => {
 });
 
 describe("wallet changes with independent PostgreSQL sessions", () => {
+  it("stores the old address when payment-link creation locks the merchant first", async () => {
+    const oldAddress = address("a");
+    const newAddress = address("b");
+    const merchantId = await createMerchant(oldAddress);
+    const requestId = await createDueRequest(merchantId, newAddress);
+    const gate = await holdTableLock("paymentIntents");
+    let gateReleased = false;
+
+    try {
+      const creation = createPaymentIntent({
+        merchantId,
+        amountAtomic: "1000000",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      await waitForLockWaiters(1);
+
+      const activation = applyWalletChangeRequest(requestId);
+      const pids = await waitForLockWaiters(2);
+      expect(new Set(pids).size).toBeGreaterThanOrEqual(2);
+      expect(pids).not.toContain(gate.pid);
+
+      await releaseGate(gate.client);
+      gateReleased = true;
+      const [created, applied] = await withTimeout(
+        Promise.all([creation, activation]),
+        "creation-first payment snapshot",
+      );
+
+      expect(created.destinationAddress).toBe(oldAddress);
+      expect(applied.kind).toBe("applied");
+      const stored = await database
+        .selectFrom("paymentIntents")
+        .select("destinationAddress")
+        .where("publicId", "=", created.publicId)
+        .executeTakeFirstOrThrow();
+      expect(stored.destinationAddress).toBe(oldAddress);
+
+      const later = await createPaymentIntent({
+        merchantId,
+        amountAtomic: "2000000",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      expect(later.destinationAddress).toBe(newAddress);
+      expect(stored.destinationAddress).toBe(oldAddress);
+    } finally {
+      if (!gateReleased) await releaseGate(gate.client);
+    }
+  });
+
+  it("stores the new address when wallet activation locks the merchant first", async () => {
+    const oldAddress = address("c");
+    const newAddress = address("d");
+    const merchantId = await createMerchant(oldAddress);
+    const requestId = await createDueRequest(merchantId, newAddress);
+    const gate = await holdTableLock("auditEvents");
+    let gateReleased = false;
+
+    try {
+      const activation = applyWalletChangeRequest(requestId);
+      await waitForLockWaiters(1);
+
+      const creation = createPaymentIntent({
+        merchantId,
+        amountAtomic: "3000000",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const pids = await waitForLockWaiters(2);
+      expect(new Set(pids).size).toBeGreaterThanOrEqual(2);
+      expect(pids).not.toContain(gate.pid);
+
+      await releaseGate(gate.client);
+      gateReleased = true;
+      const [applied, created] = await withTimeout(
+        Promise.all([activation, creation]),
+        "activation-first payment snapshot",
+      );
+
+      expect(applied.kind).toBe("applied");
+      expect(created.destinationAddress).toBe(newAddress);
+      const activeWallet = await database
+        .selectFrom("user")
+        .select("receivingWalletAddress")
+        .where("id", "=", merchantId)
+        .executeTakeFirstOrThrow();
+      expect(activeWallet.receivingWalletAddress).toBe(newAddress);
+    } finally {
+      if (!gateReleased) await releaseGate(gate.client);
+    }
+  });
+
+  it("rejects a payment link whose expiry passes while waiting for the merchant lock", async () => {
+    const merchantId = await createMerchant(address("e"));
+    const gate = await holdMerchantLock(merchantId);
+    let gateReleased = false;
+
+    try {
+      const expiresAt = new Date(Date.now() + 150);
+      const creation = createPaymentIntent({
+        merchantId,
+        amountAtomic: "4000000",
+        expiresAt,
+      });
+      await waitForLockWaiters(1);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, expiresAt.getTime() - Date.now()) + 50),
+      );
+
+      await releaseGate(gate.client);
+      gateReleased = true;
+      await expect(creation).rejects.toMatchObject({
+        constructor: BadRequestError,
+        message: "expiresAt must be a future date",
+      });
+
+      const intents = await database
+        .selectFrom("paymentIntents")
+        .select(({ fn }) => fn.count("id").as("count"))
+        .where("merchantId", "=", merchantId)
+        .executeTakeFirstOrThrow();
+      expect(Number(intents.count)).toBe(0);
+    } finally {
+      if (!gateReleased) await releaseGate(gate.client);
+    }
+  });
+
   it("lets exactly one of two blocked workers apply a due request", async () => {
     const merchantId = await createMerchant(address("1"));
     const requestId = await createDueRequest(merchantId, address("2"));
