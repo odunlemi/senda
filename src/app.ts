@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
 import helmet from "helmet";
+import type { Logger } from "pino";
 import { pinoHttp } from "pino-http";
 
 import { env } from "./config/env.js";
@@ -11,6 +12,13 @@ import { paymentIntentsRouter } from "../services/payment-intents/payment-intent
 import { checkoutRouter } from "../services/checkout/checkout.routes.js";
 import { receiptsRouter } from "../services/receipts/receipts.routes.js";
 
+export function createHttpLoggingMiddleware(
+  requestLogger: Logger = logger,
+  autoLogging = env.NODE_ENV !== "test",
+) {
+  return pinoHttp({ logger: requestLogger, autoLogging });
+}
+
 export function createApp(): Express {
   const app = express();
 
@@ -18,7 +26,7 @@ export function createApp(): Express {
 
   app.use(helmet());
   app.use(express.json());
-  app.use(pinoHttp({ logger, autoLogging: env.NODE_ENV !== "test" }));
+  app.use(createHttpLoggingMiddleware());
 
   app.get("/api/health", (_req, res) => {
     res.status(200).json({ success: true, data: { status: "ok" } });
