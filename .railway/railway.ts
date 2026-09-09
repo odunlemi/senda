@@ -25,6 +25,7 @@ export default defineRailway((context) => {
       runtime: "V2",
     },
     env: {
+      BASE_RPC_URL: preserve(),
       DATABASE_URL: database.env.DATABASE_URL,
       BETTER_AUTH_SECRET: preserve(),
       BETTER_AUTH_URL: preserve(),
@@ -32,6 +33,7 @@ export default defineRailway((context) => {
       OPERATIONAL_ALERTS_MODE: preserve(),
       OPERATIONAL_ALERT_WEBHOOK_URL: preserve(),
       OPERATIONAL_ALERT_WEBHOOK_TOKEN: preserve(),
+      TRUST_PROXY_HOPS: preserve(),
     },
   });
 
