@@ -12,7 +12,7 @@ export default defineConfig(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["*.config.js", "*.config.mjs"],
+          allowDefaultProject: ["*.config.js", "*.config.mjs", ".railway/railway.ts"],
         },
         tsconfigRootDir: import.meta.dirname,
       },

@@ -237,9 +237,15 @@ row. Never use a real paging or merchant endpoint from automated tests.
 
 ## Deploying
 
-`railway.json` configures the build, migrations, start command, and health
-check. Attach a Railway Postgres plugin and set `DATABASE_URL` to its reference
-variable: `${{Postgres.DATABASE_URL}}`.
+Railway project configuration is tracked in `.railway/railway.ts`. It preserves
+the API's Dockerfile build, compiled migration and start commands, health check,
+private PostgreSQL reference, and operational-alert variables. The controlled
+alert receiver is staging-only and is not a production dependency.
+
+Run `railway config plan` against the intended environment before changing live
+infrastructure. Review the complete plan before applying it, especially any
+database or volume operation. Keep real database, authentication, and Grafana
+credentials in Railway variables rather than source control.
 
 When the web UI lands, the production server should serve it from the same
 origin as the API. A separate frontend deployment and cross-origin cookie
